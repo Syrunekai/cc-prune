@@ -68,11 +68,38 @@ session normally (`exit`, not `kill`) before continuing.
 ### 1. Find the transcript
 
 Transcripts live under `~/.claude/projects/<slugified-cwd>/<session-id>.jsonl`. The
-directory is keyed on the working directory the session started in, not the project:
+directory is keyed on the working directory the session started in, not the project.
+List them with `sessions`:
+
+```bash
+python3 cc_prune.py sessions                        # newest 50
+python3 cc_prune.py sessions --project my-repo      # cwd contains 'my-repo'
+python3 cc_prune.py sessions --grep vpn --count     # match title/prompt, true message counts
+python3 cc_prune.py sessions --sort ctx --limit 10  # biggest context first: prune candidates
+```
+
+Columns: start, last activity, project, `CTX` (input tokens of the last API request
+found in the file tail), a one-line "about" (custom title, then Claude's `aiTitle`, then
+the first prompt; `--last` prefers the last prompt), size, and session id. It reads only
+the head and tail of each file, so it is fast; `--count` does a full scan. Only
+top-level session files are listed unless you pass `--subagents`. Other flags:
+`--since` / `--until` (YYYY-MM-DD), `--sort {date,size,project,ctx}`, `--reverse`,
+`--limit N` / `--all`, `--timezone`, `--json`, `--root PATH`.
+
+Put the path in a variable:
+
+```bash
+F=$(python3 cc_prune.py sessions --paths --limit 1)   # newest session
+F=$(python3 cc_prune.py sessions --grep <session-id> --paths | head -1)
+```
+
+Or find it by id without `sessions`:
 
 ```bash
 F=$(find ~/.claude/projects -name '<session-id>.jsonl' | head -1)
 ```
+
+Running `cc_prune.py` with no arguments prints a quick-start and the command list.
 
 ### 2. Get the real number
 
@@ -95,7 +122,7 @@ Buckets, in rough order of how much they are worth clearing:
 |---|---|---|
 | `results` | `--results N` | tool output. Safest, usually the biggest win. |
 | `inputs` | `--inputs N` | `Write`/`Edit` bodies. Real semantic cost — the model forgets what it wrote. `file_path` is preserved. |
-| `attachments` | `--attachments N` | did not reach the API in our one test. Verify before trusting. |
+| `attachments` | `--attachments N` | mostly harmless, but `prompt_snapshot` and `deferred_tools_record` attachments carry the system prompt and tool schemas the API request is rebuilt from, so they are skipped. Clearing them made a resume fail with `tools.0.custom.input_schema: JSON schema is invalid`. Verify before trusting. |
 | `images` | `--images` | billed by pixels, not characters. ~0 tokens. Skip. |
 | `thinking` | — | **locked.** Signed. Only `/compact` touches this. |
 | `text` | — | the conversation. No flag, by design. |
@@ -117,6 +144,12 @@ see what it just did. Lowering it recovers a little more and costs a lot of cont
 Every `clear` writes a numbered snapshot first, validates the result before replacing
 the original, and refuses to write if any invariant broke.
 
+`clear` also rewrites the recorded `usage` on the last 5 requests to an estimate of the
+new size (freed result and input characters at 1.5 chars/token, subtracted from the last
+request). Without this a session that was near its limit refuses to resume, see
+[Troubleshooting](#troubleshooting). The estimate errs low on purpose and the next real
+reply replaces it with the API's own count. Pass `--no-reset-usage` to leave usage alone.
+
 ### 5. Verify
 
 Resume the session and **send a real message** — not a slash command. Read the status
@@ -132,6 +165,34 @@ claude --resume <session-id>
 python3 cc_prune.py snapshots "$F"
 python3 cc_prune.py restore  "$F" 0     # 0 = pristine
 ```
+
+---
+
+## Troubleshooting
+
+**`Context limit reached` or `Prompt is too long` right after resuming a pruned session.**
+Claude Code refuses the message in a few milliseconds, before the API counts anything. The
+recorded `usage` on the last requests still holds the pre-prune size (for example 957k),
+and `clear` does not change the conversation's recorded usage by itself. Fix:
+
+```bash
+python3 cc_prune.py reset-usage "$F" --tokens 335000    # a figure below your window
+```
+
+Pick a number comfortably under your context window. The next real reply corrects it. A
+`clear` run with the default settings already does this. Use `reset-usage` on files that
+were pruned with `--no-reset-usage` or by an older version. `--autocompact` is not a fix:
+it sets the compaction window, not this check.
+
+**`tools.0.custom.input_schema: JSON schema is invalid` after resuming.**
+`--attachments` replaced strings inside the `prompt_snapshot` or `deferred_tools_record`
+attachments, which hold the system prompt and tool schemas, including each schema's
+`$schema` URL. Current versions skip those two kinds. A file already damaged cannot be
+repaired from itself: restore a snapshot taken before the clear, or the pristine
+original, and clear again.
+
+Clearing `--attachments` is otherwise untested for the other attachment kinds. If a
+resume fails, leave `--attachments` out first.
 
 ---
 
@@ -218,9 +279,11 @@ export BASH_MAX_OUTPUT_LENGTH=4000     # default is 30000
 ## Commands
 
 ```
+sessions [--project X ...]     list and filter session transcripts
 usage FILE                     real API token counts
 inspect FILE                   byte accounting by bucket
-clear FILE --results N ...     clear buckets (snapshots first)
+clear FILE --results N ...     clear buckets (snapshots first, resets usage)
+reset-usage FILE --tokens N    rewrite stale recorded usage so a pruned session resumes
 snapshots FILE                 list snapshots
 restore FILE N                 restore snapshot N
 audit FILE LINE...             is this specific result safe to clear?
@@ -249,7 +312,7 @@ Every mutating command validates before replacing the original, and aborts leavi
 file untouched if any of these fail:
 
 - record count and `uuid` / `parentUuid` chains unchanged
-- `thinking` / `redacted_thinking` signatures byte-identical
+- `thinking` / `redacted_thinking` blocks (text and signature) identical
 - every `tool_result.tool_use_id` still has a matching `tool_use`
 
 ---

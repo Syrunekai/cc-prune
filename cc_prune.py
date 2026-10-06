@@ -5,10 +5,12 @@ cc-prune — surgical context recovery for Claude Code sessions.
 Clears digested tool output from a session transcript without summarizing
 anything, without deleting lines, and without touching thinking blocks.
 
+    cc_prune.py sessions --project cli-harness
     cc_prune.py usage    SESSION.jsonl
     cc_prune.py inspect  SESSION.jsonl
     cc_prune.py clear    SESSION.jsonl --results 500
     cc_prune.py snapshots SESSION.jsonl
+    cc_prune.py reset-usage SESSION.jsonl --tokens 335000
     cc_prune.py restore  SESSION.jsonl 0
     cc_prune.py audit    SESSION.jsonl 2328 2355
     cc_prune.py strip-commands SESSION.jsonl --orphans
@@ -35,6 +37,7 @@ import re
 import shutil
 import sys
 from collections import Counter
+from datetime import datetime, timedelta, timezone
 
 __version__ = "0.1.0"
 
@@ -45,6 +48,10 @@ NAME_RE = re.compile(r"<command-name>\s*/?([\w-]+)\s*</command-name>")
 # keys that carry structure rather than payload -- never rewritten
 STRUCTURAL = {"uuid", "parentUuid", "sessionId", "session_id", "timestamp",
               "type", "id", "tool_use_id", "name", "role", "model", "signature"}
+
+# attachment kinds that hold the system prompt and tool schemas the API
+# request is rebuilt from on resume -- clearing them invalidates the request
+API_ATTACHMENTS = {"prompt_snapshot", "deferred_tools_record"}
 
 # tool_use params worth keeping even when long: they tell the model what it did
 KEEP_PARAMS = {"file_path", "path", "notebook_path", "command", "pattern"}
@@ -71,7 +78,8 @@ def load(path: str) -> list[dict]:
 
 
 def dump(recs: list[dict], path: str) -> None:
-    with open(path, "w", encoding="utf-8") as fh:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
         fh.write("\n".join(json.dumps(r, ensure_ascii=False) for r in recs) + "\n")
 
 
@@ -79,6 +87,14 @@ def blocks(rec: dict):
     content = (rec.get("message") or {}).get("content")
     if isinstance(content, list):
         yield from (b for b in content if isinstance(b, dict))
+
+
+THINKING = ("thinking", "redacted_thinking")
+
+
+def thinking_fingerprint(recs: list[dict]) -> list[str]:
+    return [json.dumps(b, ensure_ascii=False, sort_keys=True)
+            for r in recs for b in blocks(r) if b.get("type") in THINKING]
 
 
 def result_text(block: dict) -> str:
@@ -102,7 +118,8 @@ def mb(n: float) -> str:
 # --------------------------------------------------------------------------
 
 def snapshot_paths(path: str) -> list[str]:
-    found = glob.glob(path + ".snap*")
+    found = [p for p in glob.glob(glob.escape(path) + ".snap*")
+             if re.search(r"\.snap\d+$", p)]
     return sorted(found, key=lambda p: int(re.search(r"snap(\d+)$", p).group(1)))
 
 
@@ -129,8 +146,337 @@ def cmd_restore(args) -> None:
     src = f"{args.path}.snap{args.n}"
     if not os.path.exists(src):
         sys.exit(f"no such snapshot: {src}")
-    shutil.copy2(src, args.path)
+    load(src)
+
+    if os.path.exists(args.path):
+        _, keep = take_snapshot(args.path)
+        print(f"current file saved -> {os.path.basename(keep)}")
+
+    tmp = args.path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as out, open(src, "rb") as inp:
+        shutil.copyfileobj(inp, out)
+    shutil.copymode(args.path if os.path.exists(args.path) else src, tmp)
+    os.replace(tmp, args.path)
     print(f"restored {os.path.basename(src)} -> {os.path.basename(args.path)}")
+
+
+# --------------------------------------------------------------------------
+# sessions -- list transcripts without knowing the session id
+# --------------------------------------------------------------------------
+
+PROJECTS_ROOT = "~/.claude/projects"
+HEAD_RECORDS = 300
+TAIL_BYTES = 262144
+
+
+def read_head(path: str, limit: int = HEAD_RECORDS) -> list[dict]:
+    objs = []
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        for n, line in enumerate(fh):
+            if n >= limit:
+                break
+            try:
+                objs.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return [o for o in objs if isinstance(o, dict)]
+
+
+def read_tail(path: str, size: int = TAIL_BYTES) -> list[dict]:
+    total = os.path.getsize(path)
+    with open(path, "rb") as fh:
+        if total > size:
+            fh.seek(total - size)
+            fh.readline()
+        data = fh.read()
+    objs = []
+    for line in data.decode("utf-8", "replace").splitlines():
+        try:
+            objs.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return [o for o in objs if isinstance(o, dict)]
+
+
+def context_tokens(rec: dict) -> int | None:
+    u = (rec.get("message") or {}).get("usage")
+    if isinstance(u, dict) and ("input_tokens" in u or
+                                "cache_read_input_tokens" in u):
+        return (u.get("input_tokens", 0)
+                + u.get("cache_read_input_tokens", 0)
+                + u.get("cache_creation_input_tokens", 0))
+    return None
+
+
+USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens",
+                "cache_creation_input_tokens")
+RESET_LAST_N = 5
+DENSE_CHARS_PER_TOKEN = 1.5
+MIN_ESTIMATE = 1000
+
+
+def reset_usage(recs: list[dict], tokens: int) -> list[tuple[int, int, int]]:
+    """Scale the recorded usage of the last requests down to `tokens`."""
+    idx = [i for i, r in enumerate(recs) if context_tokens(r)]
+    changed = []
+    for i in idx[-RESET_LAST_N:]:
+        old = context_tokens(recs[i])
+        if old <= tokens:
+            continue
+        u = recs[i]["message"]["usage"]
+        for f in USAGE_FIELDS:
+            u[f] = round(u.get(f, 0) * tokens / old)
+        changed.append((i, old, context_tokens(recs[i])))
+    return changed
+
+
+def user_text(rec: dict) -> str:
+    if rec.get("type") != "user" or rec.get("isMeta"):
+        return ""
+    content = (rec.get("message") or {}).get("content")
+    if isinstance(content, list):
+        content = "\n".join(b.get("text", "") for b in content
+                            if isinstance(b, dict) and b.get("type") == "text")
+    if not isinstance(content, str):
+        return ""
+    content = content.strip()
+    return "" if content.startswith("<local-command-") else content
+
+
+def session_title(path: str, objs: list[dict]) -> str | None:
+    best = None
+    for o in objs:
+        t = o.get("type")
+        if t == "ai-title":
+            cand = (2, (o.get("aiTitle") or "").strip())
+        elif t == "summary":
+            cand = (1, (o.get("summary") or "").strip())
+        else:
+            continue
+        if cand[1] and (best is None or cand[0] >= best[0]):
+            best = cand
+    sidecar = os.path.join(os.path.splitext(path)[0], "custom-title.json")
+    try:
+        with open(sidecar, encoding="utf-8") as fh:
+            custom = (json.load(fh).get("customTitle") or "").strip()
+    except (OSError, json.JSONDecodeError, AttributeError):
+        custom = ""
+    return custom or (best[1] if best else None)
+
+
+def scan_session(path: str, want_last: bool, want_count: bool) -> dict | None:
+    try:
+        head = read_head(path)
+    except OSError:
+        return None
+    if not any("sessionId" in o or o.get("type") in ("user", "assistant")
+               for o in head):
+        return None
+    try:
+        tail = read_tail(path)
+    except OSError:
+        tail = []
+
+    cwd = next((o["cwd"] for o in head
+                if isinstance(o.get("cwd"), str) and o["cwd"]), None)
+    if cwd is None:
+        proj = os.path.basename(os.path.dirname(path))
+        cwd = proj.replace("-", "/") if proj.startswith("-") else proj
+
+    title = session_title(path, head + tail)
+    first_user = next((t for t in map(user_text, head) if t), "")
+    last_user = next((t for t in map(user_text, reversed(tail)) if t), "")
+    about = title or (last_user if want_last else first_user) or first_user
+
+    stamps = [o["timestamp"] for o in head + tail
+              if isinstance(o.get("timestamp"), str)]
+    ctx = next((c for c in map(context_tokens, reversed(tail)) if c), None)
+
+    count = None
+    if want_count:
+        count = 0
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for line in fh:
+                try:
+                    o = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if (isinstance(o, dict) and o.get("type") in ("user", "assistant")
+                        and not o.get("isMeta")):
+                    count += 1
+
+    return {
+        "path": path,
+        "session_id": os.path.basename(path).split(".")[0],
+        "cwd": cwd,
+        "title": title,
+        "about": about,
+        "start": next((o["timestamp"] for o in head
+                       if isinstance(o.get("timestamp"), str)), None),
+        "end": stamps[-1] if stamps else None,
+        "size": os.path.getsize(path),
+        "context_tokens": ctx,
+        "messages": count,
+    }
+
+
+def gather_sessions(root: str, deep: bool) -> list[str]:
+    root = os.path.expanduser(root)
+    if os.path.isfile(root):
+        return [root]
+    found = []
+    for dirpath, _dirs, names in os.walk(root):
+        depth = len(os.path.relpath(dirpath, root).split(os.sep)) \
+            if dirpath != root else 0
+        if not deep and depth > 1:
+            continue
+        found.extend(os.path.join(dirpath, n) for n in names
+                     if n.endswith(".jsonl"))
+    return found
+
+
+def parse_tz(text: str) -> timezone:
+    s = text.strip().lower()
+    if s in ("utc", "0"):
+        return timezone.utc
+    try:
+        return timezone(timedelta(hours=float(s)))
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"invalid timezone '{text}'; use 'utc', '+7', '-4', '+5.5'")
+
+
+def to_local(iso: str | None, tz: timezone) -> datetime | None:
+    if not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).astimezone(tz)
+    except (ValueError, AttributeError):
+        return None
+
+
+def collapse(text: str | None, n: int) -> str:
+    t = " ".join(str(text or "").split())
+    return t[: n - 1] + "…" if len(t) > n else t
+
+
+def human_size(n: float) -> str:
+    for unit in ("B", "K", "M", "G"):
+        if n < 1024 or unit == "G":
+            return f"{n:.0f}{unit}"
+        n /= 1024
+    return f"{n:.0f}G"
+
+
+def print_sessions(rows: list[dict], tz: timezone, want_count: bool) -> None:
+    if not rows:
+        print("No sessions matched.")
+        return
+    try:
+        width = os.get_terminal_size().columns
+    except OSError:
+        width = 120
+    width = max(80, width)
+
+    w_start, w_last, w_proj, w_ctx, w_size, w_id = 16, 16, 22, 6, 5, 13
+    w_msgs = 5 if want_count else 0
+    fixed = w_start + w_last + w_proj + w_ctx + w_size + w_id + w_msgs
+    w_about = max(20, width - fixed - 6 - (1 if want_count else 0))
+
+    header = (f"{'STARTED':<{w_start}} {'LAST':<{w_last}} "
+              f"{'PROJECT':<{w_proj}} {'CTX':>{w_ctx}} ")
+    if want_count:
+        header += f"{'MSGS':>{w_msgs}} "
+    header += f"{'ABOUT':<{w_about}} {'SIZE':>{w_size}} {'ID':<{w_id}}"
+    print(header)
+    print("-" * min(width, len(header)))
+
+    home = os.path.expanduser("~")
+    for r in rows:
+        start, end = to_local(r["start"], tz), to_local(r["end"], tz)
+        if end is None:
+            last = "?"
+        elif start and start.date() == end.date():
+            last = end.strftime("%H:%M")
+        else:
+            last = end.strftime("%Y-%m-%d %H:%M")
+        cwd = r["cwd"] or ""
+        if cwd.startswith(home):
+            cwd = "~" + cwd[len(home):]
+        ctx = r["context_tokens"]
+        line = (f"{start.strftime('%Y-%m-%d %H:%M') if start else '?':<{w_start}} "
+                f"{last:<{w_last}} {collapse(cwd, w_proj):<{w_proj}} "
+                f"{f'{ctx / 1000:.0f}k' if ctx is not None else '?':>{w_ctx}} ")
+        if want_count:
+            line += f"{r['messages'] if r['messages'] is not None else '?':>{w_msgs}} "
+        line += (f"{collapse(r['about'], w_about):<{w_about}} "
+                 f"{human_size(r['size']):>{w_size}} "
+                 f"{r['session_id'][:w_id]:<{w_id}}")
+        print(line)
+
+
+def cmd_sessions(args) -> None:
+    files = gather_sessions(args.root, args.subagents)
+    if not files:
+        sys.exit(f"no .jsonl session files found under: {args.root}")
+
+    rows = []
+    for n, path in enumerate(files, 1):
+        if n % 100 == 0:
+            print(f"  scanning... {n}/{len(files)}", end="\r", file=sys.stderr)
+        rec = scan_session(path, args.last, args.count)
+        if rec:
+            rows.append(rec)
+    if len(files) >= 100:
+        print(" " * 40, end="\r", file=sys.stderr)
+
+    def keep(r: dict) -> bool:
+        if args.project and args.project.lower() not in (r["cwd"] or "").lower():
+            return False
+        if args.grep:
+            hay = " ".join([r["about"] or "", r["title"] or "",
+                            r["cwd"] or "", r["session_id"]]).lower()
+            if args.grep.lower() not in hay:
+                return False
+        start = to_local(r["start"], args.timezone)
+        day = start.strftime("%Y-%m-%d") if start else None
+        if args.since and (day is None or day < args.since):
+            return False
+        if args.until and (day is None or day > args.until):
+            return False
+        return True
+
+    rows = [r for r in rows if keep(r)]
+
+    if args.sort == "size":
+        rows.sort(key=lambda r: r["size"], reverse=not args.reverse)
+    elif args.sort == "ctx":
+        rows.sort(key=lambda r: r["context_tokens"] or 0, reverse=not args.reverse)
+    elif args.sort == "project":
+        rows.sort(key=lambda r: ((r["cwd"] or "").lower(), r["start"] or ""),
+                  reverse=args.reverse)
+    else:
+        rows.sort(key=lambda r: r["start"] or "", reverse=not args.reverse)
+
+    total = len(rows)
+    if not args.all and args.limit and total > args.limit:
+        rows = rows[: args.limit]
+
+    if args.paths:
+        for r in rows:
+            print(r["path"])
+        return
+    if args.json:
+        print(json.dumps(rows, indent=2, ensure_ascii=False))
+        return
+
+    print_sessions(rows, args.timezone, args.count)
+    note = "" if len(rows) == total else f" (showing {len(rows)}; pass --all or --limit)"
+    print(f"\n{total} session(s) matched{note}. "
+          f"Timezone: {datetime.now(args.timezone).tzname()}")
+    print("CTX = input tokens of the last API request found in the file tail.\n"
+          "Pass --paths to print file paths for the other commands.")
 
 
 # --------------------------------------------------------------------------
@@ -141,13 +487,9 @@ def cmd_usage(args) -> None:
     recs = load(args.path)
     rows = []
     for i, r in enumerate(recs):
-        u = (r.get("message") or {}).get("usage")
-        if isinstance(u, dict) and ("input_tokens" in u or
-                                    "cache_read_input_tokens" in u):
-            ctx = (u.get("input_tokens", 0)
-                   + u.get("cache_read_input_tokens", 0)
-                   + u.get("cache_creation_input_tokens", 0))
-            rows.append((i, ctx, u))
+        ctx = context_tokens(r)
+        if ctx is not None:
+            rows.append((i, ctx, r["message"]["usage"]))
 
     if not rows:
         sys.exit("No usage fields found in this transcript.\n"
@@ -205,7 +547,8 @@ NOTES = {
     "thinking": "LOCKED -- signed, cannot be edited. Only /compact touches this.",
     "text": "the conversation itself. No flag; clearing it would be amnesia.",
     "images": "billed by pixels, not characters. Usually ~0 tokens. Skip it.",
-    "attachments": "did not reach the API in our one test. Verify before trusting.",
+    "attachments": "mostly harmless, but prompt_snapshot / deferred_tools_record "
+                   "feed the API request and are skipped. Verify before trusting.",
     "results": "tool output. Safest and usually largest win.",
     "inputs": "tool call params (Write/Edit bodies). Real semantic cost.",
 }
@@ -273,17 +616,15 @@ def shrink_long_strings(obj, limit: int, stats: list) -> None:
             shrink_long_strings(v, limit, stats)
 
 
-def validate(new: list[dict], uuids: list, parents: list, sigs: list) -> str | None:
+def validate(new: list[dict], uuids: list, parents: list, thinking: list) -> str | None:
     if len(new) != len(uuids):
         return f"record count changed: {len(uuids)} -> {len(new)}"
     if [r.get("uuid") for r in new] != uuids:
         return "uuid chain changed"
     if [r.get("parentUuid") for r in new] != parents:
         return "parentUuid chain changed"
-    now = [b.get("signature") for r in new for b in blocks(r)
-           if b.get("type") in ("thinking", "redacted_thinking")]
-    if now != sigs:
-        return "thinking signatures altered -- the API would reject this"
+    if thinking_fingerprint(new) != thinking:
+        return "thinking blocks altered -- the API would reject this"
     uses = {b["id"] for r in new for b in blocks(r)
             if b.get("type") == "tool_use" and b.get("id")}
     results = {b.get("tool_use_id") for r in new for b in blocks(r)
@@ -291,6 +632,18 @@ def validate(new: list[dict], uuids: list, parents: list, sigs: list) -> str | N
     if not results <= uses:
         return "tool_use / tool_result pairing broken"
     return None
+
+
+def write_validated(recs: list[dict], path: str, uuids: list, parents: list,
+                    thinking: list) -> None:
+    tmp = path + ".tmp"
+    dump(recs, tmp)
+    problem = validate(load(tmp), uuids, parents, thinking)
+    if problem:
+        os.remove(tmp)
+        sys.exit(f"FATAL: {problem}\nOriginal file untouched.")
+    shutil.copymode(path, tmp)
+    os.replace(tmp, path)
 
 
 def cmd_clear(args) -> None:
@@ -305,8 +658,7 @@ def cmd_clear(args) -> None:
     recs = load(args.path)
     uuids = [r.get("uuid") for r in recs]
     parents = [r.get("parentUuid") for r in recs]
-    sigs = [b.get("signature") for r in recs for b in blocks(r)
-            if b.get("type") in ("thinking", "redacted_thinking")]
+    thinking = thinking_fingerprint(recs)
 
     cutoff = int(len(recs) * (1 - args.keep_tail))
     freed, hits = Counter(), Counter()
@@ -315,7 +667,8 @@ def cmd_clear(args) -> None:
         if i >= cutoff:
             break
 
-        if args.attachments and rec.get("type") == "attachment":
+        if (args.attachments and rec.get("type") == "attachment"
+                and (rec.get("attachment") or {}).get("type") not in API_ATTACHMENTS):
             stats = [0, 0]
             shrink_long_strings(rec, args.attachments, stats)
             freed["attachments"] += stats[0]
@@ -348,13 +701,15 @@ def cmd_clear(args) -> None:
                             hits["inputs"] += 1
                             params[key] = f"{PLACEHOLDER} {len(val)} chars"
 
-    tmp = args.path + ".tmp"
-    dump(recs, tmp)
-    problem = validate(load(tmp), uuids, parents, sigs)
-    if problem:
-        os.remove(tmp)
-        sys.exit(f"FATAL: {problem}\nOriginal file untouched.")
-    os.replace(tmp, args.path)
+    reset = None
+    if not args.no_reset_usage:
+        saved = freed["results"] + freed["inputs"]
+        last_ctx = next((c for c in map(context_tokens, reversed(recs)) if c), 0)
+        est = max(last_ctx - int(saved / DENSE_CHARS_PER_TOKEN), MIN_ESTIMATE)
+        if saved and est < last_ctx:
+            reset = (last_ctx, est, reset_usage(recs, est))
+
+    write_validated(recs, args.path, uuids, parents, thinking)
 
     print(f"protected the last {len(recs) - cutoff} of {len(recs)} records "
           f"(--keep-tail {args.keep_tail})")
@@ -362,10 +717,38 @@ def cmd_clear(args) -> None:
         print("nothing matched -- lower the threshold, or this bucket is empty")
     for k in freed:
         print(f"  {k:<14}{hits[k]:>6} hits   {mb(freed[k])} removed")
+    if reset:
+        print(f"\nusage reset: last request {reset[0]:,} -> ~{reset[1]:,} tokens "
+              f"on {len(reset[2])} records (estimate at {DENSE_CHARS_PER_TOKEN} "
+              f"chars/token; the next real reply corrects it)")
     print(f"\nsize {mb(os.path.getsize(snap))} -> {mb(os.path.getsize(args.path))}")
     print(f"rollback: cc_prune.py restore {os.path.basename(args.path)} {n}")
     print("\nNow: resume the session, send a REAL message (not a slash command),\n"
           "and read the status bar. Do not use /context to verify.")
+
+
+def cmd_reset_usage(args) -> None:
+    if args.tokens < 1:
+        sys.exit("--tokens must be a positive number")
+    n, snap = take_snapshot(args.path)
+    print(f"snapshot -> {os.path.basename(snap)}")
+
+    recs = load(args.path)
+    uuids = [r.get("uuid") for r in recs]
+    parents = [r.get("parentUuid") for r in recs]
+    thinking = thinking_fingerprint(recs)
+
+    changed = reset_usage(recs, args.tokens)
+    if not changed:
+        os.remove(snap)
+        sys.exit("nothing to reset: no recent request is above that figure")
+    write_validated(recs, args.path, uuids, parents, thinking)
+
+    for i, old, new in changed:
+        print(f"  line {i}: {old:,} -> {new:,}")
+    print("\nOnly the recorded usage changed. The next real reply replaces it "
+          "with the API's own count.")
+    print(f"rollback: cc_prune.py restore {os.path.basename(args.path)} {n}")
 
 
 # --------------------------------------------------------------------------
@@ -461,6 +844,8 @@ def cmd_strip_commands(args) -> None:
     def strings(rec):
         def walk(o):
             if isinstance(o, dict):
+                if o.get("type") in THINKING:
+                    return
                 for k, v in o.items():
                     if isinstance(v, str):
                         yield o, k, v
@@ -510,8 +895,7 @@ def cmd_strip_commands(args) -> None:
 
     uuids = [r.get("uuid") for r in recs]
     parents = [r.get("parentUuid") for r in recs]
-    sigs = [b.get("signature") for r in recs for b in blocks(r)
-            if b.get("type") in ("thinking", "redacted_thinking")]
+    thinking = thinking_fingerprint(recs)
 
     freed = count = 0
     for i, cont, key, named in hits:
@@ -526,13 +910,7 @@ def cmd_strip_commands(args) -> None:
             count += k
             cont[key] = after
 
-    tmp = args.path + ".tmp"
-    dump(recs, tmp)
-    problem = validate(load(tmp), uuids, parents, sigs)
-    if problem:
-        os.remove(tmp)
-        sys.exit(f"FATAL: {problem}\nOriginal file untouched.")
-    os.replace(tmp, args.path)
+    write_validated(recs, args.path, uuids, parents, thinking)
 
     print(f"stripped {count} stdout blocks, {freed:,} chars")
     print(f"kept the last {args.keep_last} of each command")
@@ -549,7 +927,34 @@ def main() -> None:
         epilog="Always confirm `pgrep -af claude` is empty before mutating "
                "a transcript.")
     p.add_argument("--version", action="version", version=f"cc-prune {__version__}")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    sub = p.add_subparsers(dest="cmd")
+
+    se = sub.add_parser("sessions", help="list and filter session transcripts")
+    se.add_argument("--root", default=PROJECTS_ROOT, metavar="PATH",
+                    help=f"directory or file to scan (default {PROJECTS_ROOT})")
+    se.add_argument("--project", metavar="SUBSTR",
+                    help="only sessions whose cwd contains SUBSTR (case-insensitive)")
+    se.add_argument("--grep", metavar="SUBSTR",
+                    help="only sessions whose about/title/cwd/id contains SUBSTR")
+    se.add_argument("--since", metavar="YYYY-MM-DD")
+    se.add_argument("--until", metavar="YYYY-MM-DD")
+    se.add_argument("--last", action="store_true",
+                    help="preview the last user message instead of the first")
+    se.add_argument("--count", action="store_true",
+                    help="true message counts (full scan of each file; slower)")
+    se.add_argument("--subagents", action="store_true",
+                    help="also scan nested files (subagent logs, backup dirs)")
+    se.add_argument("--sort", choices=["date", "size", "project", "ctx"],
+                    default="date")
+    se.add_argument("--reverse", action="store_true")
+    se.add_argument("--limit", type=int, default=50, metavar="N")
+    se.add_argument("--all", action="store_true",
+                    help="show all matches (overrides --limit)")
+    se.add_argument("--timezone", type=parse_tz, default=timezone.utc,
+                    metavar="OFFSET", help="'utc', '+7', '-4' (default utc)")
+    se.add_argument("--json", action="store_true")
+    se.add_argument("--paths", action="store_true",
+                    help="print only file paths")
 
     u = sub.add_parser("usage", help="real API token counts (source of truth)")
     u.add_argument("path")
@@ -567,6 +972,15 @@ def main() -> None:
     c.add_argument("--keep-tail", type=float, default=0.15, metavar="F",
                    help="fraction of most recent records left untouched "
                         "(default 0.15)")
+    c.add_argument("--no-reset-usage", action="store_true",
+                   help="leave the recorded usage alone (a pruned session "
+                        "near its limit may then refuse to resume)")
+
+    ru = sub.add_parser("reset-usage", help="rewrite stale recorded usage so a "
+                                            "pruned session can resume")
+    ru.add_argument("path")
+    ru.add_argument("--tokens", type=int, required=True, metavar="N",
+                    help="context size to record for the last requests")
 
     s = sub.add_parser("snapshots", help="list snapshots")
     s.add_argument("path")
@@ -593,8 +1007,20 @@ def main() -> None:
     d.add_argument("--mb", type=float, required=True)
 
     args = p.parse_args()
-    {"usage": cmd_usage, "inspect": cmd_inspect, "clear": cmd_clear,
-     "snapshots": cmd_snapshots, "restore": cmd_restore, "audit": cmd_audit,
+    if args.cmd is None:
+        print(f"cc-prune {__version__}: surgical context recovery for "
+              f"Claude Code sessions\n\n"
+              "Start here:\n"
+              "  cc_prune.py sessions                      list your sessions, newest first\n"
+              "  cc_prune.py sessions --paths --limit 1    print the newest transcript path\n"
+              "  cc_prune.py inspect FILE                  see where the bytes are\n"
+              "  cc_prune.py clear FILE --results 500      clear tool output (snapshots first)\n"
+              "  cc_prune.py restore FILE 0                roll back to snapshot 0\n\n"
+              "Run `cc_prune.py COMMAND -h` for the options of a command.\n")
+        p.print_help()
+        return
+    {"sessions": cmd_sessions, "usage": cmd_usage, "inspect": cmd_inspect, "clear": cmd_clear,
+     "reset-usage": cmd_reset_usage, "snapshots": cmd_snapshots, "restore": cmd_restore, "audit": cmd_audit,
      "strip-commands": cmd_strip_commands, "density": cmd_density}[args.cmd](args)
 
 
