@@ -2,6 +2,9 @@
 
 Surgical context recovery for Claude Code sessions.
 
+This is a fork of [QihanZhao/cc-prune](https://github.com/QihanZhao/cc-prune) (MIT). The original
+tool is 0.1.0; see [CHANGELOG.md](CHANGELOG.md) for what 0.2.0 adds.
+
 When a session approaches its context limit, the usual answer is `/compact` — which
 summarizes everything, including the reasoning you may still want. `cc-prune` takes a
 narrower cut: it clears **tool output that Claude has already digested** from the
@@ -42,7 +45,7 @@ drop the block).
 ## Install
 
 ```bash
-git clone https://github.com/QihanZhao/cc-prune
+git clone https://github.com/Syrunekai/cc-prune
 cd cc-prune
 python3 cc_prune.py --version
 ```
@@ -238,7 +241,26 @@ Safeguards on `--drop-failing-thinking`:
   and everything else, including the uuid chain, is unchanged.
 - Blocks written after the last edit are never listed or deleted.
 
-`--keep-tail` is respected by `--transformations` and ignored by `--drop-failing-thinking`.
+`--keep-tail` is respected by `--transformations` and ignored by the two thinking flags.
+
+**`--drop-all-thinking` (experimental).** `--drop-failing-thinking` can only remove blocks
+the API has already reported, so blocks written since the last prune are missed: the next
+prune invalidates them and the reports come back, smaller. `--drop-all-thinking` deletes every
+thinking block in the file, so nothing is left for the API to drop. It has the same
+safeguards (preview unless `--yes`, live-session guard, exact validation, records kept with
+empty content) and can be combined with a prune in one pass:
+
+```bash
+python3 cc_prune.py clear "$F" --results 1 --inputs 1 --images --drop-all-thinking --yes
+# wait out the live-edit window (30 s by default), then remove the saved reports:
+python3 cc_prune.py clear "$F" --transformations --keep-tail 0
+```
+
+What it costs: the reasoning is gone from the transcript, although with the default
+`display: "omitted"` the thinking text is blank anyway and the API was already dropping the
+blocks. Run it before your first message after a prune and the cache rewrite that message
+causes is the only cost. Tested on throwaway copies and on one 7,000-record session; the two
+thinking flags have not been run on many real sessions.
 
 **Running sessions.** `clear`, `strip-commands`, `reset-usage` and `restore` refuse to edit a
 transcript under the Claude config directory (`$CLAUDE_CONFIG_DIR`, default `~/.claude`)

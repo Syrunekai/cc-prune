@@ -1,0 +1,68 @@
+# Changelog
+
+## 0.2.0 (2026-10-08)
+
+Builds on 0.1.0, the original release by Qihan Zhao.
+
+### Added
+
+- `sessions`: list and filter Claude Code transcripts without knowing the session id.
+  Shows start, last activity, project, context (`CTX`), a one-line "about", size and id.
+  Filters and options: `--project`, `--grep`, `--since`, `--until`, `--last`, `--count`,
+  `--sort {date,size,project,ctx}`, `--reverse`, `--limit`, `--all`, `--timezone`, `--json`,
+  `--paths`, `--subagents`, `--root`.
+- Running `cc_prune.py` with no arguments prints a quick start and the command list.
+- `reset-usage FILE --tokens N`: rewrite the recorded token usage on the last requests.
+  A pruned session that was near its limit is refused on resume ("Context limit reached")
+  until the recorded usage is lowered.
+- `clear` now does that automatically after pruning, from an estimate of the freed
+  characters. Pass `--no-reset-usage` to leave usage alone.
+- Live-session guard on `clear`, `strip-commands`, `reset-usage` and `restore`. A transcript
+  is refused when a running Claude Code process is registered for it (including subagent
+  logs; the process start time is checked on Linux) or when it was edited within
+  `LIVE_IF_EDITED_WITHIN` seconds (default 30). `--force` overrides. Honors
+  `CLAUDE_CONFIG_DIR`.
+- A settings block near the top of `cc_prune.py`.
+- Experimental, opt-in `clear` flags for the `input_transformations` field the API returns
+  and Claude Code stores on every assistant record, which can make a pruned transcript grow
+  by tens of KB per record:
+  - `--transformations` deletes the saved reports.
+  - `--drop-failing-thinking` deletes the thinking blocks the API reported dropping.
+  - `--drop-all-thinking` deletes every thinking block.
+  - The two thinking flags preview unless `--yes` is given, refuse layouts they have not
+    been checked against, and keep the records in place with empty content.
+- `inspect` reports the `transformations` bucket.
+- README: sessions workflow, Troubleshooting section (resume refused, invalid tool schema,
+  transcript growth), live-session documentation.
+
+### Changed
+
+- `restore` validates the snapshot first, saves the current file as a new snapshot, and
+  swaps atomically, so a restore can no longer silently discard work done since the prune.
+- Rewritten transcripts keep the original file mode. The temporary file is created `0600`.
+- Validation compares whole thinking blocks, not only their signatures.
+- `--attachments` skips `prompt_snapshot` and `deferred_tools_record` attachments. They hold
+  the system prompt and tool schemas the API request is rebuilt from, and clearing them made
+  a resume fail with `tools.0.custom.input_schema: JSON schema is invalid`.
+
+### Fixed
+
+- `strip-commands` could rewrite the text of a thinking block that contained
+  `<local-command-stdout>` tags.
+- Snapshot listing crashed on a stray `*.snapshot` file and treated glob characters in the
+  path as wildcards.
+
+### Known limits
+
+- The thinking flags have been run on throwaway copies and a few real sessions only.
+- The live-session guard was tested on Linux. The macOS and Windows branches are simulated.
+- The transcript format is undocumented and changes between Claude Code versions.
+- Python 3.9 is the stated minimum but only 3.13 has been run; the code parses under the 3.9
+  grammar.
+- The tool rewrites JSON with a space after `:` and `,`, which grows a rewritten file by
+  about 3% compared with Claude Code's compact form.
+
+## 0.1.0
+
+Original release by Qihan Zhao: `usage`, `inspect`, `clear`, `snapshots`, `restore`,
+`audit`, `strip-commands` and `density`.

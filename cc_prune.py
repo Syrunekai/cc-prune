@@ -41,7 +41,7 @@ import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # --------------------------------------------------------------------------
 # settings -- the values you are most likely to want to change
@@ -785,24 +785,35 @@ def write_validated(recs: list[dict], path: str, uuids: list, parents: list,
     os.replace(tmp, path)
 
 
+def thinking_plan(recs: list[dict], args) -> list[tuple[int, int]]:
+    if args.drop_all_thinking:
+        return thinking_positions(recs)
+    return failing_thinking(recs)
+
+
 def cmd_clear(args) -> None:
+    drops_thinking = args.drop_failing_thinking or args.drop_all_thinking
     if not any([args.results, args.inputs, args.attachments, args.images,
-                args.transformations, args.drop_failing_thinking]):
+                args.transformations, drops_thinking]):
         sys.exit("pick at least one bucket: --results N / --inputs N / "
                  "--attachments N / --images / --transformations / "
-                 "--drop-failing-thinking\n"
+                 "--drop-failing-thinking / --drop-all-thinking\n"
                  "(N is a length threshold in characters; use 1 to clear all)")
+    if args.drop_failing_thinking and args.drop_all_thinking:
+        sys.exit("--drop-failing-thinking and --drop-all-thinking are alternatives; "
+                 "pick one")
 
-    if args.drop_failing_thinking and not args.yes:
+    if drops_thinking and not args.yes:
         recs = load(args.path)
-        plan = failing_thinking(recs)
+        plan = thinking_plan(recs, args)
         if not plan:
-            sys.exit("no dropped-thinking reports in this file; nothing to delete")
+            sys.exit("no thinking blocks to delete in this file")
         lines = sorted({i for i, _ in plan})
         models = sorted({(recs[i].get("message") or {}).get("model") or "?"
                          for i in lines})
         total = len(thinking_positions(recs))
-        print(f"PREVIEW, nothing written. --drop-failing-thinking would delete "
+        flag = "--drop-all-thinking" if args.drop_all_thinking else "--drop-failing-thinking"
+        print(f"PREVIEW, nothing written. {flag} would delete "
               f"{len(plan)} of {total} thinking blocks\n"
               f"  records {lines[0]}..{lines[-1]}, models: {', '.join(models)}\n"
               f"  {total - len(plan)} thinking blocks stay "
@@ -812,8 +823,8 @@ def cmd_clear(args) -> None:
         return
 
     guard_live(args)
-    if args.drop_failing_thinking:
-        failing_thinking(load(args.path))
+    if drops_thinking:
+        thinking_plan(load(args.path), args)
 
     n, snap = take_snapshot(args.path)
     print(f"snapshot -> {os.path.basename(snap)}")
@@ -826,9 +837,9 @@ def cmd_clear(args) -> None:
     cutoff = int(len(recs) * (1 - args.keep_tail))
     freed, hits = Counter(), Counter()
 
-    if args.drop_failing_thinking:
+    if drops_thinking:
         pos = thinking_positions(recs)
-        targets = set(failing_thinking(recs))
+        targets = set(thinking_plan(recs, args))
         for i, j in pos:
             if (i, j) in targets:
                 freed["thinking"] += len(json.dumps(recs[i]["message"]["content"][j],
@@ -1158,8 +1169,14 @@ def main() -> None:
                         "reported dropping (prefix_binding_mismatch). Previews "
                         "only unless --yes is also given; refuses layouts it "
                         "has not been checked against; ignores --keep-tail")
+    c.add_argument("--drop-all-thinking", action="store_true",
+                   help="EXPERIMENTAL: delete every thinking block, including "
+                        "ones this prune is about to invalidate. Records stay "
+                        "with empty content. Previews only unless --yes is "
+                        "also given; ignores --keep-tail")
     c.add_argument("--yes", action="store_true",
-                   help="apply --drop-failing-thinking instead of previewing")
+                   help="apply --drop-failing-thinking / --drop-all-thinking "
+                        "instead of previewing")
     c.add_argument("--force", action="store_true",
                    help="edit a transcript even if a running session has it open")
     c.add_argument("--transformations", action="store_true",
