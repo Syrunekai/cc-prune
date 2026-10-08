@@ -19,6 +19,7 @@ anything, without deleting lines, and without touching thinking blocks.
 Invariants held by every mutating command:
   * no line is ever deleted           -> uuid / parentUuid chain intact
   * thinking blocks are never touched -> cryptographically signed
+    (except the blocks `clear --drop-failing-thinking` is asked to delete)
   * tool_use ids and tool_result tool_use_ids are never touched -> pairing
   * every write is validated before replacing the original
   * every clear takes a numbered snapshot first
@@ -36,10 +37,23 @@ import os
 import re
 import shutil
 import sys
+import time
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
 __version__ = "0.1.0"
+
+# --------------------------------------------------------------------------
+# settings -- the values you are most likely to want to change
+# --------------------------------------------------------------------------
+
+CONFIG_DIR = os.environ.get("CLAUDE_CONFIG_DIR") or "~/.claude"
+PROJECTS_ROOT = os.path.join(CONFIG_DIR, "projects")
+SESSIONS_DIR = os.path.join(CONFIG_DIR, "sessions")
+
+# seconds: a transcript under PROJECTS_ROOT edited more recently than this is
+# treated as belonging to a running session (0 turns the check off)
+LIVE_IF_EDITED_WITHIN = 30
 
 PLACEHOLDER = "[cleared]"
 STDOUT_RE = re.compile(r"(<local-command-stdout>)(.*?)(</local-command-stdout>)", re.S)
@@ -90,6 +104,125 @@ def blocks(rec: dict):
 
 
 THINKING = ("thinking", "redacted_thinking")
+
+
+def thinking_positions(recs: list[dict]) -> list[tuple[int, int]]:
+    pos = []
+    for i, r in enumerate(recs):
+        content = (r.get("message") or {}).get("content")
+        if isinstance(content, list):
+            pos.extend((i, j) for j, b in enumerate(content)
+                       if isinstance(b, dict) and b.get("type") in THINKING)
+    return pos
+
+
+def failing_thinking(recs: list[dict]) -> list[tuple[int, int]]:
+    """The thinking blocks the API reported dropping, or [] when there are none.
+
+    The blocks that fail are the ones that existed when the history was last
+    edited: the first record of the latest run of equal reports is the first
+    request after that edit, so the k blocks just before it are the failing
+    ones. Blocks written after that request are valid and are never listed.
+    Exits instead of guessing when the report does not fit a shape that has
+    been checked against real transcripts."""
+    reports = []
+    for i, r in enumerate(recs):
+        entries = (r.get("message") or {}).get("input_transformations")
+        if entries:
+            k = sum(1 for e in entries if isinstance(e, dict)
+                    and e.get("type") == "thinking_dropped"
+                    and e.get("reason") == "prefix_binding_mismatch")
+            if k:
+                reports.append((i, k))
+    if not reports:
+        return []
+    start, k = reports[-1]
+    for i, ki in reversed(reports[:-1]):
+        if ki != k:
+            break
+        start = i
+    pos = thinking_positions(recs)
+    before = [p for p in pos if p[0] < start]
+    if k > len(before):
+        sys.exit(f"refusing: the report at record {start} lists {k} dropped "
+                 f"thinking blocks but only {len(before)} precede it")
+    if len(before) - k <= 1:
+        return before
+    if before[-1] == pos[-1]:
+        return before[len(before) - k:]
+    sys.exit(f"refusing: {k} blocks were reported dropped, but {len(before) - k} "
+             f"older and {len(pos) - len(before)} newer thinking blocks surround "
+             f"them. Only two layouts are supported (all earlier blocks dropped, "
+             f"or the dropped blocks are the newest) and this is neither")
+
+
+UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
+
+
+def session_ids_for(real: str) -> set[str]:
+    """Session ids a transcript path belongs to: its own file name, plus any
+    directory between the project folder and the file named after a session
+    (subagent logs live under <session-id>/subagents/)."""
+    root = os.path.realpath(os.path.expanduser(PROJECTS_ROOT))
+    parts = os.path.relpath(real, root).split(os.sep)
+    names = [os.path.basename(real).split(".")[0]] + parts[1:-1]
+    return {n for n in names if UUID_RE.match(n)}
+
+
+def process_running(pid: int, started) -> bool:
+    """Whether the registered process is still running. On Linux the start time
+    must also match, so a reused pid is not mistaken for the session; without
+    /proc only existence can be checked; on Windows nothing can, so assume yes."""
+    try:
+        with open(f"/proc/{pid}/stat", encoding="utf-8") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[19] == str(started)
+    except (OSError, IndexError):
+        pass
+    if os.name == "posix" and not os.path.isdir("/proc"):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        except PermissionError:
+            return True
+        return True
+    return os.name != "posix"
+
+
+def live_reasons(path: str) -> list[str]:
+    """Why this transcript looks like it belongs to a running session."""
+    real = os.path.realpath(path)
+    root = os.path.realpath(os.path.expanduser(PROJECTS_ROOT))
+    if not real.startswith(root + os.sep):
+        return []
+    reasons = []
+    ids = session_ids_for(real)
+    for f in glob.glob(os.path.join(os.path.expanduser(SESSIONS_DIR), "*.json")):
+        try:
+            with open(f, encoding="utf-8") as fh:
+                d = json.load(fh)
+        except (OSError, json.JSONDecodeError):
+            continue
+        pid = d.get("pid")
+        if (d.get("sessionId") in ids and isinstance(pid, int)
+                and process_running(pid, d.get("procStart"))):
+            reasons.append(f"registered to running pid {pid}")
+    if LIVE_IF_EDITED_WITHIN > 0:
+        try:
+            age = time.time() - os.path.getmtime(real)
+        except OSError:
+            age = None
+        if age is not None and age < LIVE_IF_EDITED_WITHIN:
+            reasons.append(f"edited {max(age, 0):.0f}s ago "
+                           f"(LIVE_IF_EDITED_WITHIN = {LIVE_IF_EDITED_WITHIN}s)")
+    return reasons
+
+
+def guard_live(args) -> None:
+    reasons = live_reasons(args.path)
+    if reasons and not args.force:
+        sys.exit("this session looks live: " + "; ".join(reasons) + ".\n"
+                 "Exit it first, or pass --force to edit it anyway.")
 
 
 def thinking_fingerprint(recs: list[dict]) -> list[str]:
@@ -146,6 +279,7 @@ def cmd_restore(args) -> None:
     src = f"{args.path}.snap{args.n}"
     if not os.path.exists(src):
         sys.exit(f"no such snapshot: {src}")
+    guard_live(args)
     load(src)
 
     if os.path.exists(args.path):
@@ -165,7 +299,6 @@ def cmd_restore(args) -> None:
 # sessions -- list transcripts without knowing the session id
 # --------------------------------------------------------------------------
 
-PROJECTS_ROOT = "~/.claude/projects"
 HEAD_RECORDS = 300
 TAIL_BYTES = 262144
 
@@ -526,6 +659,9 @@ def bucket_sizes(recs: list[dict]) -> tuple[Counter, Counter, Counter]:
         by_type[t] += len(json.dumps(r, ensure_ascii=False))
         if t == "attachment":
             buckets["attachments"] += len(json.dumps(r, ensure_ascii=False))
+        it = (r.get("message") or {}).get("input_transformations")
+        if it:
+            buckets["transformations"] += len(json.dumps(it, ensure_ascii=False))
         for b in blocks(r):
             k = b.get("type", "?")
             size = len(json.dumps(b, ensure_ascii=False))
@@ -541,7 +677,8 @@ def bucket_sizes(recs: list[dict]) -> tuple[Counter, Counter, Counter]:
 
 
 CLEARABLE = {"results": "--results N", "inputs": "--inputs N",
-             "attachments": "--attachments N", "images": "--images"}
+             "attachments": "--attachments N", "images": "--images",
+             "transformations": "--transformations"}
 
 NOTES = {
     "thinking": "LOCKED -- signed, cannot be edited. Only /compact touches this.",
@@ -549,6 +686,8 @@ NOTES = {
     "images": "billed by pixels, not characters. Usually ~0 tokens. Skip it.",
     "attachments": "mostly harmless, but prompt_snapshot / deferred_tools_record "
                    "feed the API request and are skipped. Verify before trusting.",
+    "transformations": "Claude Code's own log of thinking blocks it dropped from "
+                       "requests. Not conversation; may be rewritten on every turn.",
     "results": "tool output. Safest and usually largest win.",
     "inputs": "tool call params (Write/Edit bodies). Real semantic cost.",
 }
@@ -647,10 +786,34 @@ def write_validated(recs: list[dict], path: str, uuids: list, parents: list,
 
 
 def cmd_clear(args) -> None:
-    if not any([args.results, args.inputs, args.attachments, args.images]):
+    if not any([args.results, args.inputs, args.attachments, args.images,
+                args.transformations, args.drop_failing_thinking]):
         sys.exit("pick at least one bucket: --results N / --inputs N / "
-                 "--attachments N / --images\n"
+                 "--attachments N / --images / --transformations / "
+                 "--drop-failing-thinking\n"
                  "(N is a length threshold in characters; use 1 to clear all)")
+
+    if args.drop_failing_thinking and not args.yes:
+        recs = load(args.path)
+        plan = failing_thinking(recs)
+        if not plan:
+            sys.exit("no dropped-thinking reports in this file; nothing to delete")
+        lines = sorted({i for i, _ in plan})
+        models = sorted({(recs[i].get("message") or {}).get("model") or "?"
+                         for i in lines})
+        total = len(thinking_positions(recs))
+        print(f"PREVIEW, nothing written. --drop-failing-thinking would delete "
+              f"{len(plan)} of {total} thinking blocks\n"
+              f"  records {lines[0]}..{lines[-1]}, models: {', '.join(models)}\n"
+              f"  {total - len(plan)} thinking blocks stay "
+              f"({len([p for p in thinking_positions(recs) if p[0] > lines[-1]])} "
+              f"of them newer)\n"
+              f"Add --yes to apply (every other flag you passed is also held back).")
+        return
+
+    guard_live(args)
+    if args.drop_failing_thinking:
+        failing_thinking(load(args.path))
 
     n, snap = take_snapshot(args.path)
     print(f"snapshot -> {os.path.basename(snap)}")
@@ -663,9 +826,28 @@ def cmd_clear(args) -> None:
     cutoff = int(len(recs) * (1 - args.keep_tail))
     freed, hits = Counter(), Counter()
 
+    if args.drop_failing_thinking:
+        pos = thinking_positions(recs)
+        targets = set(failing_thinking(recs))
+        for i, j in pos:
+            if (i, j) in targets:
+                freed["thinking"] += len(json.dumps(recs[i]["message"]["content"][j],
+                                                    ensure_ascii=False))
+                hits["thinking"] += 1
+        thinking = [fp for fp, p in zip(thinking, pos) if p not in targets]
+        for i, j in sorted(targets, reverse=True):
+            recs[i]["message"]["content"].pop(j)
+
     for i, rec in enumerate(recs):
         if i >= cutoff:
             break
+
+        msg = rec.get("message")
+        if args.transformations and isinstance(msg, dict):
+            logged = msg.pop("input_transformations", None)
+            if logged:
+                freed["transformations"] += len(json.dumps(logged, ensure_ascii=False))
+                hits["transformations"] += 1
 
         if (args.attachments and rec.get("type") == "attachment"
                 and (rec.get("attachment") or {}).get("type") not in API_ATTACHMENTS):
@@ -730,6 +912,7 @@ def cmd_clear(args) -> None:
 def cmd_reset_usage(args) -> None:
     if args.tokens < 1:
         sys.exit("--tokens must be a positive number")
+    guard_live(args)
     n, snap = take_snapshot(args.path)
     print(f"snapshot -> {os.path.basename(snap)}")
 
@@ -884,6 +1067,7 @@ def cmd_strip_commands(args) -> None:
         print("  (drop --dry-run to strip)")
         return
 
+    guard_live(args)
     n, snap = take_snapshot(args.path)
     print(f"snapshot -> {os.path.basename(snap)}")
 
@@ -969,6 +1153,18 @@ def main() -> None:
     c.add_argument("--inputs", type=int, default=0, metavar="N")
     c.add_argument("--attachments", type=int, default=0, metavar="N")
     c.add_argument("--images", action="store_true")
+    c.add_argument("--drop-failing-thinking", action="store_true",
+                   help="EXPERIMENTAL: delete the thinking blocks the API "
+                        "reported dropping (prefix_binding_mismatch). Previews "
+                        "only unless --yes is also given; refuses layouts it "
+                        "has not been checked against; ignores --keep-tail")
+    c.add_argument("--yes", action="store_true",
+                   help="apply --drop-failing-thinking instead of previewing")
+    c.add_argument("--force", action="store_true",
+                   help="edit a transcript even if a running session has it open")
+    c.add_argument("--transformations", action="store_true",
+                   help="delete the input_transformations log Claude Code "
+                        "writes on assistant records (experimental)")
     c.add_argument("--keep-tail", type=float, default=0.15, metavar="F",
                    help="fraction of most recent records left untouched "
                         "(default 0.15)")
@@ -981,6 +1177,8 @@ def main() -> None:
     ru.add_argument("path")
     ru.add_argument("--tokens", type=int, required=True, metavar="N",
                     help="context size to record for the last requests")
+    ru.add_argument("--force", action="store_true",
+                    help="edit a transcript even if a running session has it open")
 
     s = sub.add_parser("snapshots", help="list snapshots")
     s.add_argument("path")
@@ -988,6 +1186,8 @@ def main() -> None:
     r = sub.add_parser("restore", help="restore a snapshot")
     r.add_argument("path")
     r.add_argument("n", type=int)
+    r.add_argument("--force", action="store_true",
+                   help="edit a transcript even if a running session has it open")
 
     a = sub.add_parser("audit", help="is a specific tool_result safe to clear?")
     a.add_argument("path")
@@ -1000,6 +1200,8 @@ def main() -> None:
                     help="strip every stdout block regardless of command name")
     sc.add_argument("--keep-last", type=int, default=1)
     sc.add_argument("--dry-run", action="store_true")
+    sc.add_argument("--force", action="store_true",
+                    help="edit a transcript even if a running session has it open")
 
     d = sub.add_parser("density", help="derive chars/token from a measured cut")
     d.add_argument("--before", type=int, required=True)
