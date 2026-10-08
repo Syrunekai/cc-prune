@@ -11,7 +11,7 @@ narrower cut: it clears **tool output that Claude has already digested** from th
 session transcript, leaving the conversation, the reasoning, and the structure intact.
 
 Nothing is summarized. No line is deleted. Thinking blocks are never touched, except by
-the explicit, experimental `--drop-failing-thinking` flag (see
+the explicit, experimental `--drop-failing-thinking` and `--drop-all-thinking` flags (see
 [Troubleshooting](#troubleshooting)).
 
 ```
@@ -20,6 +20,48 @@ the explicit, experimental `--drop-failing-thinking` flag (see
 
 That is a real measurement from one session. Your mileage will vary a lot — see
 [What to expect](#what-to-expect).
+
+---
+
+## Quick start
+
+1. **Exit the Claude Code session** (`exit`, not `kill`). Commands that edit a transcript
+   refuse one that looks live; `--force` overrides that.
+2. **Find the transcript.** This lists your sessions, newest first, with their context size:
+
+   ```bash
+   python3 cc_prune.py sessions
+   F=$(python3 cc_prune.py sessions --paths --limit 1)   # or the path of the one you want
+   ```
+
+3. **Prune.** This is the step that frees context. It clears old tool results and tool
+   inputs, takes a snapshot first, and rewrites the recorded usage so the session can be
+   resumed:
+
+   ```bash
+   python3 cc_prune.py clear "$F" --results 1 --inputs 1 --images
+   ```
+
+4. **Resume, send a real message, and read the context from the status bar.** The number
+   the tool printed is an estimate; the first reply replaces it with the API's own count.
+   To undo: `python3 cc_prune.py restore "$F" 0`.
+
+That is the whole job. Everything below is detail.
+
+**Optional: keep the transcript file from growing.** After a prune, Claude Code's API drops
+the thinking blocks that came after the first edit and reports it on every record, which can
+add tens of KB per record. Add the experimental thinking flag to the same command (it
+previews unless `--yes` is given):
+
+```bash
+python3 cc_prune.py clear "$F" --results 1 --inputs 1 --images --drop-all-thinking --yes
+```
+
+If the file is already bloated from earlier resumes, wait 30 seconds (the live-session check
+counts the tool's own write) and remove the saved reports with
+`python3 cc_prune.py clear "$F" --transformations --keep-tail 0`. This is optional and
+experimental: the thinking flags change the file's size, not the model's context. Run alone,
+they leave the context count exactly as it was. See [Troubleshooting](#troubleshooting).
 
 ---
 
