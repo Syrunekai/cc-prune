@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- README Quick start: the prune step now includes `--drop-all-thinking --yes`, so a first
+  prune is one command. The `--transformations` pass is documented only for sessions pruned
+  and resumed before without the thinking flag. Suspended (ctrl+z) sessions count as running.
+
 ## 0.2.0 (2026-10-08)
 
 Builds on 0.1.0, the original release by Qihan Zhao.

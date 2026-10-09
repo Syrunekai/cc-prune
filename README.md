@@ -26,7 +26,8 @@ That is a real measurement from one session. Your mileage will vary a lot — se
 ## Quick start
 
 1. **Exit the Claude Code session** (`exit`, not `kill`). Commands that edit a transcript
-   refuse one that looks live; `--force` overrides that.
+   refuse one that looks live; `--force` overrides that. A session suspended with ctrl+z is
+   still running: bring it back with `fg` and exit it.
 2. **Find the transcript.** This lists your sessions, newest first, with their context size:
 
    ```bash
@@ -35,12 +36,18 @@ That is a real measurement from one session. Your mileage will vary a lot — se
    ```
 
 3. **Prune.** This is the step that frees context. It clears old tool results and tool
-   inputs, takes a snapshot first, and rewrites the recorded usage so the session can be
-   resumed:
+   inputs, deletes the thinking blocks, takes a snapshot first, and rewrites the recorded
+   usage so the session can be resumed:
 
    ```bash
-   python3 cc_prune.py clear "$F" --results 1 --inputs 1 --images
+   python3 cc_prune.py clear "$F" --results 1 --inputs 1 --images --drop-all-thinking --yes
    ```
+
+   The thinking flag keeps the file from growing after the resume. A prune makes Claude
+   Code's API drop the thinking blocks that came after the first edit and report it on every
+   record, which can add tens of KB per record; with no thinking left there is nothing to
+   drop. It changes the file's size, not the model's context. Leave it off (and `--yes`,
+   which only it needs) to keep the reasoning in the transcript.
 
 4. **Resume, send a real message, and read the context from the status bar.** The number
    the tool printed is an estimate; the first reply replaces it with the API's own count.
@@ -48,20 +55,16 @@ That is a real measurement from one session. Your mileage will vary a lot — se
 
 That is the whole job. Everything below is detail.
 
-**Optional: keep the transcript file from growing.** After a prune, Claude Code's API drops
-the thinking blocks that came after the first edit and reports it on every record, which can
-add tens of KB per record. Add the experimental thinking flag to the same command (it
-previews unless `--yes` is given):
+**Pruned and resumed before without the thinking flag?** Then the file already holds the
+saved reports, and step 3 stops new ones but leaves those. Wait 30 seconds after step 3 (the
+live-session check counts the tool's own write) and remove them:
 
 ```bash
-python3 cc_prune.py clear "$F" --results 1 --inputs 1 --images --drop-all-thinking --yes
+python3 cc_prune.py clear "$F" --transformations --keep-tail 0
 ```
 
-If the file is already bloated from earlier resumes, wait 30 seconds (the live-session check
-counts the tool's own write) and remove the saved reports with
-`python3 cc_prune.py clear "$F" --transformations --keep-tail 0`. This is optional and
-experimental: the thinking flags change the file's size, not the model's context. Run alone,
-they leave the context count exactly as it was. See [Troubleshooting](#troubleshooting).
+On a session's first prune there is nothing to remove. The thinking flags are experimental;
+see [Troubleshooting](#troubleshooting).
 
 ---
 
@@ -294,15 +297,17 @@ empty content) and can be combined with a prune in one pass:
 
 ```bash
 python3 cc_prune.py clear "$F" --results 1 --inputs 1 --images --drop-all-thinking --yes
-# wait out the live-edit window (30 s by default), then remove the saved reports:
+# only if earlier resumes already saved reports: wait out the live-edit window
+# (30 s by default), then remove them:
 python3 cc_prune.py clear "$F" --transformations --keep-tail 0
 ```
 
 What it costs: the reasoning is gone from the transcript, although with the default
 `display: "omitted"` the thinking text is blank anyway and the API was already dropping the
 blocks. Run it before your first message after a prune and the cache rewrite that message
-causes is the only cost. Tested on throwaway copies and on one 7,000-record session; the two
-thinking flags have not been run on many real sessions.
+causes is the only cost. Tested on throwaway copies and on two real sessions (about 7,000 and
+3,900 records); on both, every record written after the resume reported nothing dropped. The
+two thinking flags have not been run on many real sessions.
 
 **Running sessions.** `clear`, `strip-commands`, `reset-usage` and `restore` refuse to edit a
 transcript under the Claude config directory (`$CLAUDE_CONFIG_DIR`, default `~/.claude`)
