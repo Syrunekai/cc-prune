@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Changed
+
+- The usage estimate `clear` and `cut` write is rebuilt. It splits the conversation at
+  the requests made since the last edit, whose recorded counts are exact, and estimates
+  only how each segment divides among its records (text by characters, thinking by
+  signature length). Thinking the edit deletes or invalidates now counts as removed,
+  carried attachments count as moved, and an edit right after another starts from the
+  snapshot that still holds real counts. The result is lowered by 2.5%. The old estimate
+  (removed characters at 1.5 chars/token) was up to 12% over the real count; on 27 real
+  before/after pairs the new one was under on every pair, by 0.3% to 15%.
+- Records whose usage cc-prune rewrote carry `"ccPruneEstimate": true`.
+- Character counts for tool results and attachments no longer include JSON keys and
+  escaping, which changes the sizes `cut --list` shows and the `--drop` boundaries a little.
+
 ### Fixed
 
 - `cut` on a session cut before: the note now carries the running total. A note inside

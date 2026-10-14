@@ -352,7 +352,6 @@ def context_tokens(rec: dict) -> int | None:
 USAGE_FIELDS = ("input_tokens", "cache_read_input_tokens",
                 "cache_creation_input_tokens")
 RESET_LAST_N = 5
-DENSE_CHARS_PER_TOKEN = 1.5
 MIN_ESTIMATE = 1000
 
 
@@ -367,6 +366,7 @@ def reset_usage(recs: list[dict], tokens: int) -> list[tuple[int, int, int]]:
         u = recs[i]["message"]["usage"]
         for f in USAGE_FIELDS:
             u[f] = round(u.get(f, 0) * tokens / old)
+        recs[i][ESTIMATE_MARK] = True
         changed.append((i, old, context_tokens(recs[i])))
     return changed
 
@@ -833,10 +833,12 @@ def cmd_clear(args) -> None:
     if drops_thinking:
         thinking_plan(load(args.path), args)
 
+    since = last_edit_time(args.path)
     n, snap = take_snapshot(args.path)
     print(f"snapshot -> {os.path.basename(snap)}")
 
     recs = load(args.path)
+    before = load(args.path)
     uuids = [r.get("uuid") for r in recs]
     parents = [r.get("parentUuid") for r in recs]
     thinking = thinking_fingerprint(recs)
@@ -912,11 +914,10 @@ def cmd_clear(args) -> None:
                         params["command"] = f"{PLACEHOLDER} {len(val)} chars"
 
     reset = None
-    if not args.no_reset_usage:
-        saved = freed["results"] + freed["inputs"] + freed["commands"]
+    if not args.no_reset_usage and set(freed) - {"transformations"}:
         last_ctx = next((c for c in map(context_tokens, reversed(recs)) if c), 0)
-        est = max(last_ctx - int(saved / DENSE_CHARS_PER_TOKEN), MIN_ESTIMATE)
-        if saved and est < last_ctx:
+        est = estimate_after(args.path, before, recs, since)
+        if est and est < last_ctx:
             reset = (last_ctx, est, reset_usage(recs, est))
 
     write_validated(recs, args.path, uuids, parents, thinking)
@@ -929,8 +930,8 @@ def cmd_clear(args) -> None:
         print(f"  {k:<14}{hits[k]:>6} hits   {mb(freed[k])} removed")
     if reset:
         print(f"\nusage reset: last request {reset[0]:,} -> ~{reset[1]:,} tokens "
-              f"on {len(reset[2])} records (estimate at {DENSE_CHARS_PER_TOKEN} "
-              f"chars/token; the next real reply corrects it)")
+              f"on {len(reset[2])} records (estimate, kept "
+              f"{ESTIMATE_MARGIN:.1%} under; the next real reply corrects it)")
     print(f"\nsize {mb(os.path.getsize(snap))} -> {mb(os.path.getsize(args.path))}")
     print(f"rollback: cc_prune.py restore {os.path.basename(args.path)} {n}")
     print("\nNow: resume the session, send a REAL message (not a slash command),\n"
@@ -1192,12 +1193,23 @@ def is_prompt(rec: dict) -> bool:
     return not first_text(rec).lstrip().startswith("<local-command-")
 
 
+def leaf_chars(obj) -> int:
+    """Length of the string values in a JSON value, without keys or escaping."""
+    if isinstance(obj, str):
+        return len(obj)
+    if isinstance(obj, dict):
+        return sum(leaf_chars(v) for k, v in obj.items() if k != "type")
+    if isinstance(obj, list):
+        return sum(leaf_chars(v) for v in obj)
+    return 0
+
+
 def rendered_chars(rec: dict) -> int:
     """Characters a record adds to the model's context, roughly. Thinking and
     the system prompt and tool schemas the request is rebuilt from are left out."""
     if rec.get("type") == "attachment":
         att = rec.get("attachment") or {}
-        return 0 if att.get("type") in API_ATTACHMENTS else len(json.dumps(att, ensure_ascii=False))
+        return 0 if att.get("type") in API_ATTACHMENTS else leaf_chars(att)
     content = (rec.get("message") or {}).get("content")
     if isinstance(content, str):
         return len(content)
@@ -1209,7 +1221,7 @@ def rendered_chars(rec: dict) -> int:
         elif kind == "tool_use":
             n += len(json.dumps(b.get("input"), ensure_ascii=False))
         elif kind == "tool_result":
-            n += len(result_text(b))
+            n += leaf_chars(b.get("content"))
     return n
 
 
@@ -1372,41 +1384,8 @@ def cmd_cut(args) -> None:
     earlier = sum(noted_turns(first_text(recs[turns.first(t)])) for t in range(a, b))
     cut_chars = sum(turns.size[a:b])
     total_chars = sum(turns.size)
-    last_ctx = next((c for c in map(context_tokens, reversed(recs)) if c), 0)
-    est = max(last_ctx - int(cut_chars / DENSE_CHARS_PER_TOKEN), MIN_ESTIMATE)
     mode = "purge (deleted from the file)" if args.purge else \
         "branch (stays in the file, unreachable)"
-
-    def prompt(t: int) -> str:
-        return " ".join(first_text(recs[turns.first(t)]).split())[:70]
-
-    print(f"conversation: {len(turns)} turns, {total_chars:,} chars")
-    print(f"  keep turns 1-{a}")
-    print(f"  cut  turns {a + 1}-{b}  {cut_chars:,} chars "
-          f"({cut_chars / total_chars:.0%} of all), {len(cut)} records")
-    if earlier:
-        print(f"         (plus {earlier} turns earlier cuts already removed; "
-              f"the note will say {b - a + earlier})")
-    print(f"         first cut:  {prompt(a)}")
-    print(f"         first kept: {prompt(b)}")
-    if args.from_turn and (a + 1, b) != (args.from_turn, args.to_turn):
-        print(f"         (asked for {args.from_turn}-{args.to_turn}; moved to the nearest "
-              f"turns marked ok in --list)")
-    print(f"  keep turns {b + 1}-{len(turns)}")
-    if carried:
-        kinds = Counter((recs[i].get("attachment") or {}).get("type") for i in carried)
-        print("  carried over: " + ", ".join(f"{k} x{v}" for k, v in kinds.items()))
-    print(f"  mode: {mode}")
-    if last_ctx:
-        print(f"  context: last request {last_ctx:,} -> ~{est:,} tokens (estimate at "
-              f"{DENSE_CHARS_PER_TOKEN} chars/token)")
-    if not args.yes:
-        print("\nPREVIEW, nothing written. Add --yes to apply.")
-        return
-
-    guard_live(args)
-    n, snap = take_snapshot(args.path)
-    print(f"\nsnapshot -> {os.path.basename(snap)}")
 
     purged = descendants(recs, set(turns.chain[turns.bounds[a]:turns.bounds[b]]),
                          {tail_first}) if args.purge else set()
@@ -1429,8 +1408,43 @@ def cmd_cut(args) -> None:
                 add_note(r, b - a + earlier)
         new.append(r)
 
+    since = last_edit_time(args.path)
+    last_ctx = next((c for c in map(context_tokens, reversed(recs)) if c), 0)
+    est = estimate_after(args.path, recs, new, since) if last_ctx else None
+
+    def prompt(t: int) -> str:
+        return " ".join(first_text(recs[turns.first(t)]).split())[:70]
+
+    print(f"conversation: {len(turns)} turns, {total_chars:,} chars")
+    print(f"  keep turns 1-{a}")
+    print(f"  cut  turns {a + 1}-{b}  {cut_chars:,} chars "
+          f"({cut_chars / total_chars:.0%} of all), {len(cut)} records")
+    if earlier:
+        print(f"         (plus {earlier} turns earlier cuts already removed; "
+              f"the note will say {b - a + earlier})")
+    print(f"         first cut:  {prompt(a)}")
+    print(f"         first kept: {prompt(b)}")
+    if args.from_turn and (a + 1, b) != (args.from_turn, args.to_turn):
+        print(f"         (asked for {args.from_turn}-{args.to_turn}; moved to the nearest "
+              f"turns marked ok in --list)")
+    print(f"  keep turns {b + 1}-{len(turns)}")
+    if carried:
+        kinds = Counter((recs[i].get("attachment") or {}).get("type") for i in carried)
+        print("  carried over: " + ", ".join(f"{k} x{v}" for k, v in kinds.items()))
+    print(f"  mode: {mode}")
+    if est:
+        print(f"  context: last request {last_ctx:,} -> ~{est:,} tokens (estimate, kept "
+              f"{ESTIMATE_MARGIN:.1%} under)")
+    if not args.yes:
+        print("\nPREVIEW, nothing written. Add --yes to apply.")
+        return
+
+    guard_live(args)
+    n, snap = take_snapshot(args.path)
+    print(f"\nsnapshot -> {os.path.basename(snap)}")
+
     reset = None
-    if last_ctx and not args.no_reset_usage and est < last_ctx:
+    if est and not args.no_reset_usage and est < last_ctx:
         reset = reset_usage(new, est)
 
     expect = [recs[i]["uuid"] for i in turns.chain[:turns.bounds[a]]] \
@@ -1491,6 +1505,168 @@ def validate_cut(new: list[dict], old: list[dict], purged: set[int], copies: lis
     if not all_results <= all_uses:
         return "tool_use / tool_result pairing broken"
     return None
+
+
+# --------------------------------------------------------------------------
+# context estimate -- what the next request will count after an edit
+# --------------------------------------------------------------------------
+
+# weights that split a measured token count among the records it covers
+WEIGHT_CHARS_PER_TOKEN = 2.0
+SIGNATURE_CHARS_PER_TOKEN = 7.0
+# system prompt and tool schemas, counted before the first record
+OVERHEAD_TOKENS = 15000
+# fraction the estimate is lowered by so it lands just under the real count
+ESTIMATE_MARGIN = 0.025
+# set on records whose usage cc-prune rewrote, so a later estimate skips them
+ESTIMATE_MARK = "ccPruneEstimate"
+
+
+def iso_time(stamp) -> float:
+    try:
+        return datetime.fromisoformat(str(stamp).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
+
+
+def last_edit_time(path: str) -> float:
+    """When this transcript was last rewritten by cc-prune: the newest snapshot."""
+    return max((os.stat(s).st_ctime for s in snapshot_paths(path)), default=0.0)
+
+
+def content_key(rec: dict) -> str:
+    return json.dumps([(rec.get("message") or {}).get("content"), rec.get("attachment")],
+                      ensure_ascii=False, sort_keys=True)
+
+
+def estimate_context(old: list[dict], new: list[dict], since: float,
+                     margin: float = ESTIMATE_MARGIN) -> tuple[int | None, bool]:
+    """Tokens the next request will count after an edit turned `old` into `new`.
+
+    Each request made after the last edit (`since`) recorded the exact token
+    count of everything before it, so the conversation splits into segments of
+    known size. Only how a segment divides among its records is estimated: text
+    by characters, thinking by signature length. Records before the first such
+    request share that request's count with the system prompt and tool schemas.
+    Thinking the edit invalidates (every block after the first changed record)
+    counts as removed. Returns the estimate (None when the file holds no usage)
+    and whether it rests on counts made after the last edit."""
+    last = next((i for i in range(len(old) - 1, -1, -1) if context_tokens(old[i])), None)
+    if last is None:
+        return None, False
+    turns = Turns(old)
+    conv = turns.members(0, len(turns))
+
+    # requests: the first record of each assistant message that carries usage
+    points = {}
+    for i in conv + [last]:
+        r = old[i]
+        if r.get("type") == "assistant" and context_tokens(r) and i <= last:
+            key = (r.get("message") or {}).get("id") or r.get("uuid")
+            if key not in points or i < points[key][0]:
+                points[key] = (i, context_tokens(r), iso_time(r.get("timestamp")) > since
+                               and not r.get(ESTIMATE_MARK))
+    real = sorted((i, tok) for i, tok, fresh in points.values() if fresh)
+    fresh = bool(real)
+    # a count lower than the one before it means the content was edited in
+    # between, so only the counts after the last drop describe this content
+    drops = [k for k in range(1, len(real)) if real[k][1] < real[k - 1][1]]
+    if drops:
+        real = real[drops[-1]:]
+    if not real:
+        key = (old[last].get("message") or {}).get("id") or old[last].get("uuid")
+        real = [points[key][:2]]
+    # the first request's count covers the opening prompt and attachments,
+    # which no edit touches
+    first = min(points.values())
+    if first[0] < real[0][0] and first[1] < real[0][1]:
+        real.insert(0, first[:2])
+    bounds = [i for i, _ in real]
+    totals = [real[0][1]] + [real[k][1] - real[k - 1][1] for k in range(1, len(real))]
+    base = real[-1][1]
+    conv = [i for i in conv if i < bounds[-1]]
+
+    def seg(i: int) -> int:
+        return sum(1 for b in bounds if b <= i)
+
+    # thinking the last request still counted: all but the oldest it reported dropping
+    dropped = sum(1 for e in (old[bounds[-1]].get("message") or {}).get("input_transformations") or []
+                  if isinstance(e, dict) and e.get("type") == "thinking_dropped")
+    sigs = [b.get("signature") or b.get("data") or "" for i in conv for b in blocks(old[i])
+            if b.get("type") in THINKING]
+    valid = set(sigs[dropped:])
+
+    def weight(rec: dict, live: set) -> float:
+        w = rendered_chars(rec) / WEIGHT_CHARS_PER_TOKEN
+        for b in blocks(rec):
+            sig = b.get("signature") or b.get("data") or ""
+            if b.get("type") in THINKING and sig in live:
+                w += len(sig) / SIGNATURE_CHARS_PER_TOKEN
+        return w
+
+    w_old = {i: weight(old[i], valid) for i in conv}
+    seg_w = [0.0] * len(bounds)
+    seg_w[0] = OVERHEAD_TOKENS
+    for i in conv:
+        seg_w[seg(i)] += w_old[i]
+    scale = [t / w if w > 0 and t > 0 else 1.0 for t, w in zip(totals, seg_w)]
+
+    # the new conversation, up to the same request; thinking after the first
+    # changed record no longer matches its signature
+    old_uuids = {old[i].get("uuid") for i in conv}
+    nturns = Turns(new)
+    nconv = nturns.members(0, len(nturns))
+    by_uuid = {old[i].get("uuid"): i for i in conv}
+    first_change = len(nconv)
+    for pos, j in enumerate(nconv):
+        i = by_uuid.get(new[j].get("uuid"))
+        if i is None or pos >= len(conv) or conv[pos] != i or content_key(old[i]) != content_key(new[j]):
+            first_change = pos
+            break
+    kept_valid = {b.get("signature") or b.get("data") or ""
+                  for pos, j in enumerate(nconv) if pos < first_change
+                  for b in blocks(new[j]) if b.get("type") in THINKING} & valid
+
+    w_new = {new[j].get("uuid"): weight(new[j], kept_valid) for j in nconv}
+    # a record copied to a new place (carried attachments) costs what it did
+    known = {r.get("uuid") for r in old if r.get("uuid")}
+    copies = {}
+    for j in nconv:
+        if new[j].get("uuid") not in known:
+            copies.setdefault(content_key(new[j]), []).append(new[j].get("uuid"))
+    moved = set()
+    for i in conv:
+        if old[i].get("uuid") not in w_new and copies.get(content_key(old[i])):
+            moved.add(old[i].get("uuid"))
+            moved.add(copies[content_key(old[i])].pop())
+    overall = base / (sum(seg_w) or 1)
+    removed = sum(scale[seg(i)] * (w_old[i] - w_new.get(old[i].get("uuid"), 0.0))
+                  for i in conv if old[i].get("uuid") not in moved)
+    added = sum(overall * w for u, w in w_new.items() if u not in old_uuids and u not in moved)
+    est = base - removed + added
+    return max(int(est * (1 - margin)), MIN_ESTIMATE), fresh
+
+
+def estimate_after(path: str, before: list[dict], new: list[dict], since: float) -> int | None:
+    """estimate_context from the newest version of the file whose counts are
+    real: the file before this edit, or, when this edit follows another one
+    with no request in between, the snapshot taken before that one."""
+    est, fresh = estimate_context(before, new, since)
+    if fresh or est is None:
+        return est
+    snaps = snapshot_paths(path)
+    times = [os.stat(s).st_ctime for s in snaps]
+    tried = 0
+    for k in range(len(snaps) - 1, -1, -1):
+        if times[k] > since:
+            continue
+        older, ok = estimate_context(load(snaps[k]), new, times[k - 1] if k else 0.0)
+        if ok:
+            return older
+        tried += 1
+        if tried == 5:
+            break
+    return est
 
 
 # --------------------------------------------------------------------------

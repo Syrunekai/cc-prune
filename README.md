@@ -199,10 +199,21 @@ Every `clear` writes a numbered snapshot first, validates the result before repl
 the original, and refuses to write if any invariant broke.
 
 `clear` also rewrites the recorded `usage` on the last 5 requests to an estimate of the
-new size (freed result and input characters at 1.5 chars/token, subtracted from the last
-request). Without this a session that was near its limit refuses to resume, see
-[Troubleshooting](#troubleshooting). The estimate errs low on purpose and the next real
-reply replaces it with the API's own count. Pass `--no-reset-usage` to leave usage alone.
+new size. Without this a session that was near its limit refuses to resume, see
+[Troubleshooting](#troubleshooting). The next real reply replaces it with the API's own
+count. Pass `--no-reset-usage` to leave usage alone.
+
+How the estimate works (`clear` and `cut`): every request made since the last edit
+recorded the exact token count of everything before it, so the conversation splits into
+segments of known size. Only how a segment divides among its records is estimated: text
+by characters, thinking by the length of its signature (Opus thinking shows little text
+but counts in full; the signature carries it). Thinking the edit invalidates counts as
+removed. When an edit follows another with no request in between, the estimate starts
+from the snapshot that still holds real counts. The result is lowered by 2.5% so it lands
+under the real count. Checked against 27 real before/after pairs from pruned sessions:
+every estimate was under the first real count, by 0.3% to 15% (the larger gaps come from
+what Claude Code adds on resume, which no estimate can see). Records whose usage cc-prune
+rewrote carry `"ccPruneEstimate": true`, so a later estimate never treats them as real.
 
 ### 5. Verify
 
@@ -425,7 +436,9 @@ python3 cc_prune.py cut "$F" --from 6 --to 120 --yes         # exact turns, incl
   conversation here]`, so the model knows why it cannot see them. `--no-note` skips it.
   Repeated cuts keep one note with the running total: a note inside the cut stretch is
   added to the new count, and a note already on the first kept prompt is merged.
-- Recorded usage is reset to an estimate at 1.5 chars/token, as with `clear`.
+- Recorded usage is reset to an estimate, as with `clear` ("How the estimate works" under
+  Workflow step 4).
+  The preview shows it before anything is written.
 
 The model loses everything in the cut turns. Kept turns that refer to cut ones stay as
 they are, so the model may notice it is missing something they depend on. Thinking blocks
