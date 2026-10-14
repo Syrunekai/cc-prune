@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+
+- `cut` on a session cut before: the note now carries the running total. A note inside
+  the cut stretch is added to the new count (it used to be dropped with its turn), and a
+  note already on the first kept prompt is merged instead of stacked. The preview shows
+  the earlier total.
+
 ## 0.2.1 (2026-10-14)
 
 ### Added

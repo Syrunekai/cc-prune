@@ -423,6 +423,8 @@ python3 cc_prune.py cut "$F" --from 6 --to 120 --yes         # exact turns, incl
   turns call it: Claude Code rebuilds the loaded set from the history it resumes.
 - The first kept prompt gets a note, `[cc-prune: N earlier turns were cut from the
   conversation here]`, so the model knows why it cannot see them. `--no-note` skips it.
+  Repeated cuts keep one note with the running total: a note inside the cut stretch is
+  added to the new count, and a note already on the first kept prompt is merged.
 - Recorded usage is reset to an estimate at 1.5 chars/token, as with `clear`.
 
 The model loses everything in the cut turns. Kept turns that refer to cut ones stay as

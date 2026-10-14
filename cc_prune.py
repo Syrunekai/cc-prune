@@ -1139,6 +1139,8 @@ def cmd_strip_commands(args) -> None:
 CARRIED_ATTACHMENTS = API_ATTACHMENTS | {"deferred_tools_delta", "mcp_instructions_delta",
                                          "skill_listing", "agent_listing_delta"}
 CUT_NOTE = "[cc-prune: {n} earlier turns were cut from the conversation here]"
+CUT_NOTE_RE = re.compile(r"\[cc-prune: (\d+) earlier turns were cut from the conversation here\]"
+                         r"(?:\n\n)?")
 
 
 def active_chain(recs: list[dict]) -> list[int]:
@@ -1286,16 +1288,24 @@ def descendants(recs: list[dict], roots: set[int], stop: set[int]) -> set[int]:
     return out
 
 
-def add_note(rec: dict, note: str) -> None:
+def noted_turns(text: str) -> int:
+    """Turns earlier cuts recorded in the notes inside `text`."""
+    return sum(int(m.group(1)) for m in CUT_NOTE_RE.finditer(text))
+
+
+def add_note(rec: dict, n: int) -> None:
+    """Put the cut note at the start of the prompt, merging a note already there."""
     msg = rec["message"]
     if isinstance(msg.get("content"), str):
-        msg["content"] = f"{note}\n\n{msg['content']}"
+        text = msg["content"]
+        msg["content"] = f"{CUT_NOTE.format(n=n + noted_turns(text))}\n\n{CUT_NOTE_RE.sub('', text)}"
         return
     for b in msg["content"]:
         if isinstance(b, dict) and b.get("type") == "text":
-            b["text"] = f"{note}\n\n{b.get('text', '')}"
+            text = b.get("text", "")
+            b["text"] = f"{CUT_NOTE.format(n=n + noted_turns(text))}\n\n{CUT_NOTE_RE.sub('', text)}"
             return
-    msg["content"].insert(0, {"type": "text", "text": note})
+    msg["content"].insert(0, {"type": "text", "text": CUT_NOTE.format(n=n)})
 
 
 def cut_range(turns: Turns, args) -> tuple[int, int]:
@@ -1358,6 +1368,8 @@ def cmd_cut(args) -> None:
     kept = turns.members(0, a) + turns.members(b, len(turns))
 
     carried = [i for i in cut if is_carried(recs[i])]
+    # turns removed by earlier cuts whose notes sit in this stretch
+    earlier = sum(noted_turns(first_text(recs[turns.first(t)])) for t in range(a, b))
     cut_chars = sum(turns.size[a:b])
     total_chars = sum(turns.size)
     last_ctx = next((c for c in map(context_tokens, reversed(recs)) if c), 0)
@@ -1372,6 +1384,9 @@ def cmd_cut(args) -> None:
     print(f"  keep turns 1-{a}")
     print(f"  cut  turns {a + 1}-{b}  {cut_chars:,} chars "
           f"({cut_chars / total_chars:.0%} of all), {len(cut)} records")
+    if earlier:
+        print(f"         (plus {earlier} turns earlier cuts already removed; "
+              f"the note will say {b - a + earlier})")
     print(f"         first cut:  {prompt(a)}")
     print(f"         first kept: {prompt(b)}")
     if args.from_turn and (a + 1, b) != (args.from_turn, args.to_turn):
@@ -1411,7 +1426,7 @@ def cmd_cut(args) -> None:
             r = json.loads(json.dumps(r))
             r["parentUuid"] = parent
             if not args.no_note:
-                add_note(r, CUT_NOTE.format(n=b - a))
+                add_note(r, b - a + earlier)
         new.append(r)
 
     reset = None
