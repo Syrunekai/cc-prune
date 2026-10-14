@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Added
+
+- `clear --commands N`: clear `Bash` `command` values longer than `N` characters.
+  `--inputs` keeps them (they are in `KEEP_PARAMS`), so long heredocs and inline scripts
+  had no flag before.
+
+### Fixed
+
+- A second `clear --inputs` pass re-cleared values the first pass had already replaced
+  with `[cleared] N chars` and counted them as freed, which inflated the hit count and
+  lowered the usage estimate. Those values are now skipped.
+
 ### Changed
 
 - README Quick start: the prune step now includes `--drop-all-thinking --yes`, so a first

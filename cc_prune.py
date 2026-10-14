@@ -793,9 +793,9 @@ def thinking_plan(recs: list[dict], args) -> list[tuple[int, int]]:
 
 def cmd_clear(args) -> None:
     drops_thinking = args.drop_failing_thinking or args.drop_all_thinking
-    if not any([args.results, args.inputs, args.attachments, args.images,
-                args.transformations, drops_thinking]):
-        sys.exit("pick at least one bucket: --results N / --inputs N / "
+    if not any([args.results, args.inputs, args.commands, args.attachments,
+                args.images, args.transformations, drops_thinking]):
+        sys.exit("pick at least one bucket: --results N / --inputs N / --commands N / "
                  "--attachments N / --images / --transformations / "
                  "--drop-failing-thinking / --drop-all-thinking\n"
                  "(N is a length threshold in characters; use 1 to clear all)")
@@ -884,19 +884,29 @@ def cmd_clear(args) -> None:
                     b["content"] = PLACEHOLDER
                     b.pop("is_error", None)
                     rec.pop("toolUseResult", None)
-            elif kind == "tool_use" and args.inputs:
+            elif kind == "tool_use":
                 params = b.get("input")
-                if isinstance(params, dict):
+                if not isinstance(params, dict):
+                    continue
+                if args.inputs:
                     for key, val in params.items():
                         if (isinstance(val, str) and len(val) > args.inputs
-                                and key not in KEEP_PARAMS):
+                                and key not in KEEP_PARAMS
+                                and not val.startswith(PLACEHOLDER)):
                             freed["inputs"] += len(val)
                             hits["inputs"] += 1
                             params[key] = f"{PLACEHOLDER} {len(val)} chars"
+                if args.commands and b.get("name") == "Bash":
+                    val = params.get("command")
+                    if (isinstance(val, str) and len(val) > args.commands
+                            and not val.startswith(PLACEHOLDER)):
+                        freed["commands"] += len(val)
+                        hits["commands"] += 1
+                        params["command"] = f"{PLACEHOLDER} {len(val)} chars"
 
     reset = None
     if not args.no_reset_usage:
-        saved = freed["results"] + freed["inputs"]
+        saved = freed["results"] + freed["inputs"] + freed["commands"]
         last_ctx = next((c for c in map(context_tokens, reversed(recs)) if c), 0)
         est = max(last_ctx - int(saved / DENSE_CHARS_PER_TOKEN), MIN_ESTIMATE)
         if saved and est < last_ctx:
@@ -1162,6 +1172,9 @@ def main() -> None:
     c.add_argument("path")
     c.add_argument("--results", type=int, default=0, metavar="N")
     c.add_argument("--inputs", type=int, default=0, metavar="N")
+    c.add_argument("--commands", type=int, default=0, metavar="N",
+                   help="clear Bash `command` values longer than N chars "
+                        "(--inputs never touches them)")
     c.add_argument("--attachments", type=int, default=0, metavar="N")
     c.add_argument("--images", action="store_true")
     c.add_argument("--drop-failing-thinking", action="store_true",

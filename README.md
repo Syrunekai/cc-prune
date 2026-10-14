@@ -173,6 +173,7 @@ Buckets, in rough order of how much they are worth clearing:
 |---|---|---|
 | `results` | `--results N` | tool output. Safest, usually the biggest win. |
 | `inputs` | `--inputs N` | `Write`/`Edit` bodies. Real semantic cost — the model forgets what it wrote. `file_path` is preserved. |
+| `commands` | `--commands N` | `Bash` `command` values. `--inputs` never touches them. Long heredocs and inline scripts add up; the model forgets exactly what it ran, and the output stays unless `--results` clears it too. |
 | `attachments` | `--attachments N` | mostly harmless, but `prompt_snapshot` and `deferred_tools_record` attachments carry the system prompt and tool schemas the API request is rebuilt from, so they are skipped. Clearing them made a resume fail with `tools.0.custom.input_schema: JSON schema is invalid`. Verify before trusting. |
 | `images` | `--images` | billed by pixels, not characters. ~0 tokens. Skip. |
 | `thinking` | `--drop-failing-thinking` (experimental) | **locked by default.** Signed, and each block is bound to everything before it, so editing earlier tool results makes the API drop later blocks anyway. The flag deletes only the blocks the API already reported dropping. |
