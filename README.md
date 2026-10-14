@@ -3,7 +3,7 @@
 Surgical context recovery for Claude Code sessions.
 
 This is a fork of [QihanZhao/cc-prune](https://github.com/QihanZhao/cc-prune) (MIT). The original
-tool is 0.1.0; see [CHANGELOG.md](CHANGELOG.md) for what 0.2.0 adds.
+tool is 0.1.0; see [CHANGELOG.md](CHANGELOG.md) for what this fork adds.
 
 When a session approaches its context limit, the usual answer is `/compact` — which
 summarizes everything, including the reasoning you may still want. `cc-prune` takes a
@@ -12,7 +12,8 @@ session transcript, leaving the conversation, the reasoning, and the structure i
 
 Nothing is summarized. No line is deleted. Thinking blocks are never touched, except by
 the explicit, experimental `--drop-failing-thinking` and `--drop-all-thinking` flags (see
-[Troubleshooting](#troubleshooting)).
+[Troubleshooting](#troubleshooting)). The one command that removes conversation is `cut`,
+which drops a stretch of whole turns you pick (see [Cutting turns](#cutting-turns)).
 
 ```
 86.8% full  ──[ clear --results ]──►  57% full
@@ -396,6 +397,48 @@ python3 cc_prune.py density --before 867650 --after 570000 --mb 0.45
 
 ---
 
+## Cutting turns
+
+When most of what is left is conversation, clearing buckets stops paying. `cut` removes a
+stretch of whole turns from the middle and keeps the start and the recent end verbatim. A
+turn is one prompt and everything up to the next prompt.
+
+```bash
+python3 cc_prune.py cut "$F" --list                          # numbered turns, sizes, prompts
+python3 cc_prune.py cut "$F" --keep-head 5 --drop 0.5        # preview
+python3 cc_prune.py cut "$F" --keep-head 5 --drop 0.5 --yes  # apply
+python3 cc_prune.py cut "$F" --from 6 --to 120 --yes         # exact turns, inclusive
+```
+
+- `--keep-head N` (default 5) keeps the first N turns. `--drop F` then cuts that fraction of
+  the rest, by size, starting right after the head. The first and the last turn always stay.
+- The first kept turn is re-linked onto the head. By default the cut turns stay in the
+  file as an unreachable branch; `--purge` deletes them. The snapshot holds them either way.
+- Both ends of a cut land where no tool call is waiting for its result. `--list` marks
+  those turns `ok`.
+- Attachments that carry harness state (system prompt and tool schemas, deferred tool,
+  MCP, agent and skill listings) are copied over from the cut stretch, so the tail keeps the
+  tools it had.
+- A tool that ToolSearch loaded inside the cut stretch still works afterwards if the kept
+  turns call it: Claude Code rebuilds the loaded set from the history it resumes.
+- The first kept prompt gets a note, `[cc-prune: N earlier turns were cut from the
+  conversation here]`, so the model knows why it cannot see them. `--no-note` skips it.
+- Recorded usage is reset to an estimate at 1.5 chars/token, as with `clear`.
+
+The model loses everything in the cut turns. Kept turns that refer to cut ones stay as
+they are, so the model may notice it is missing something they depend on. Thinking blocks
+after the cut no longer match their signatures, so the API drops them, the same as after
+any prune; running `clear --drop-all-thinking` after a cut avoids that.
+
+Tested on Claude Code 2.1.296, resuming with Sonnet 5.5 (thinking) and Haiku: synthetic
+sessions and copies of real interactive sessions, both modes, a second cut on a cut file,
+parallel tool results on either side of the cut and inside it, and a ToolSearch-loaded
+tool called after its loading turn was cut. Every resume worked; the model recalled the
+kept turns and none of the cut ones, and the next turn was appended to the kept tail.
+Without the note the model concluded the cut turns had never happened, so leave it on.
+
+---
+
 ## Preventing the problem
 
 Surgery is triage. The durable fixes are upstream:
@@ -423,6 +466,7 @@ snapshots FILE                 list snapshots
 restore FILE N                 restore snapshot N
 audit FILE LINE...             is this specific result safe to clear?
 strip-commands FILE --orphans  clear /context, /cost output
+cut FILE --drop F | --from A --to B   cut a stretch of turns (previews unless --yes)
 density --before --after --mb  derive chars/token from a measured cut
 ```
 
@@ -451,6 +495,11 @@ file untouched if any of these fail:
   blocks `--drop-failing-thinking` was asked to delete (the check then expects exactly
   those removed)
 - every `tool_result.tool_use_id` still has a matching `tool_use`
+
+`cut` changes the chain on purpose, so it checks its own set instead: the conversation a
+resume loads is exactly the head, the carried attachments and the tail; no other
+`parentUuid` and no thinking block changed; and every kept `tool_result` still has its
+`tool_use`.
 
 ---
 

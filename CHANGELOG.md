@@ -1,9 +1,18 @@
 # Changelog
 
-## Unreleased
+## 0.2.1 (2026-10-14)
 
 ### Added
 
+- `cut`: remove a stretch of whole turns from the middle of the conversation and keep the
+  start and the recent end. `--keep-head N --drop F` cuts a fraction of the conversation
+  after the head by size; `--from A --to B` cuts exact turns; `--list` numbers the turns.
+  Previews unless `--yes`. The first kept turn is re-linked onto the head; the cut turns
+  stay as an unreachable branch, or are deleted with `--purge`. Both ends land where no
+  tool call is waiting for a result. State attachments in the cut stretch (system prompt,
+  tool schemas, tool/MCP/agent/skill listings) are copied over. The first kept prompt gets
+  a note unless `--no-note`. Recorded usage is reset to an estimate. Same live-session
+  guard and snapshot as `clear`, with its own validation.
 - `clear --commands N`: clear `Bash` `command` values longer than `N` characters.
   `--inputs` keeps them (they are in `KEEP_PARAMS`), so long heredocs and inline scripts
   had no flag before.

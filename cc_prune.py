@@ -14,15 +14,21 @@ anything, without deleting lines, and without touching thinking blocks.
     cc_prune.py restore  SESSION.jsonl 0
     cc_prune.py audit    SESSION.jsonl 2328 2355
     cc_prune.py strip-commands SESSION.jsonl --orphans
+    cc_prune.py cut      SESSION.jsonl --keep-head 5 --drop 0.5
     cc_prune.py density  --before 867650 --after 570000 --mb 0.45
 
-Invariants held by every mutating command:
+Invariants held by every mutating command except `cut`:
   * no line is ever deleted           -> uuid / parentUuid chain intact
   * thinking blocks are never touched -> cryptographically signed
     (except the blocks `clear --drop-failing-thinking` is asked to delete)
   * tool_use ids and tool_result tool_use_ids are never touched -> pairing
   * every write is validated before replacing the original
   * every clear takes a numbered snapshot first
+
+`cut` re-links the first kept turn onto the head and, with --purge, deletes
+the cut records. It validates its own set: the resumed conversation is
+exactly head + carried attachments + tail, every other parentUuid and every
+thinking block is unchanged, and tool calls stay paired.
 
 SCHEMA WARNING: the transcript format is undocumented and changes between
 Claude Code versions. Everything here was reverse-engineered. Always keep
@@ -38,10 +44,11 @@ import re
 import shutil
 import sys
 import time
+import uuid
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 
-__version__ = "0.2.0"
+__version__ = "0.2.1"
 
 # --------------------------------------------------------------------------
 # settings -- the values you are most likely to want to change
@@ -1123,6 +1130,355 @@ def cmd_strip_commands(args) -> None:
 
 
 # --------------------------------------------------------------------------
+# cut -- drop a stretch of turns from the middle of the conversation
+# --------------------------------------------------------------------------
+
+# attachments that carry harness state (system prompt, tool schemas, tool, MCP,
+# agent and skill listings) forward from the turn they appear in; a cut keeps
+# copies of the ones in the cut stretch
+CARRIED_ATTACHMENTS = API_ATTACHMENTS | {"deferred_tools_delta", "mcp_instructions_delta",
+                                         "skill_listing", "agent_listing_delta"}
+CUT_NOTE = "[cc-prune: {n} earlier turns were cut from the conversation here]"
+
+
+def active_chain(recs: list[dict]) -> list[int]:
+    """Record indexes of the conversation a resume loads, oldest first: the
+    parentUuid walk from the newest main-thread record back to its root (the
+    first record, or the latest compact boundary)."""
+    by = {r["uuid"]: i for i, r in enumerate(recs) if r.get("uuid")}
+    leaf = next((i for i in range(len(recs) - 1, -1, -1)
+                 if recs[i].get("uuid") and not recs[i].get("isSidechain")), None)
+    if leaf is None:
+        sys.exit("no conversation records in this file")
+    chain, i = [], leaf
+    while i is not None:
+        if len(chain) > len(recs):
+            sys.exit("parentUuid loop in this file; refusing to cut")
+        chain.append(i)
+        parent = recs[i].get("parentUuid")
+        if parent and parent not in by:
+            sys.exit(f"record {i} points to a missing parent; refusing to cut")
+        i = by.get(parent) if parent else None
+    return chain[::-1]
+
+
+def tool_siblings(recs: list[dict], chain: list[int]) -> dict[int, list[int]]:
+    """Tool results that hang off the chain instead of sitting on it, keyed by
+    the chain record they hang from. Parallel tool calls put every result but
+    the last one there, and a resume still loads them."""
+    on, pos = set(chain), {recs[i]["uuid"]: i for i in chain}
+    out = {}
+    for j, r in enumerate(recs):
+        if (j not in on and r.get("type") == "user" and r.get("parentUuid") in pos
+                and not r.get("isSidechain") and any(b.get("type") == "tool_result" for b in blocks(r))):
+            out.setdefault(pos[r["parentUuid"]], []).append(j)
+    return out
+
+
+def first_text(rec: dict) -> str:
+    content = (rec.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return content
+    return next((b.get("text", "") for b in blocks(rec) if b.get("type") == "text"), "")
+
+
+def is_prompt(rec: dict) -> bool:
+    if rec.get("type") != "user" or rec.get("isMeta") or rec.get("isCompactSummary"):
+        return False
+    if any(b.get("type") == "tool_result" for b in blocks(rec)):
+        return False
+    return not first_text(rec).lstrip().startswith("<local-command-")
+
+
+def rendered_chars(rec: dict) -> int:
+    """Characters a record adds to the model's context, roughly. Thinking and
+    the system prompt and tool schemas the request is rebuilt from are left out."""
+    if rec.get("type") == "attachment":
+        att = rec.get("attachment") or {}
+        return 0 if att.get("type") in API_ATTACHMENTS else len(json.dumps(att, ensure_ascii=False))
+    content = (rec.get("message") or {}).get("content")
+    if isinstance(content, str):
+        return len(content)
+    n = 0
+    for b in blocks(rec):
+        kind = b.get("type")
+        if kind == "text":
+            n += len(b.get("text", ""))
+        elif kind == "tool_use":
+            n += len(json.dumps(b.get("input"), ensure_ascii=False))
+        elif kind == "tool_result":
+            n += len(result_text(b))
+    return n
+
+
+def is_carried(rec: dict) -> bool:
+    return (rec.get("type") == "attachment"
+            and (rec.get("attachment") or {}).get("type") in CARRIED_ATTACHMENTS)
+
+
+def tool_ids(recs: list[dict], idx) -> tuple[set, set]:
+    uses, results = set(), set()
+    for i in idx:
+        for b in blocks(recs[i]):
+            if b.get("type") == "tool_use" and b.get("id"):
+                uses.add(b["id"])
+            elif b.get("type") == "tool_result":
+                results.add(b.get("tool_use_id"))
+    return uses, results
+
+
+class Turns:
+    """The active conversation split into turns: a prompt and everything up to
+    the next prompt. Records before the first prompt belong to turn 0."""
+
+    def __init__(self, recs: list[dict]):
+        self.recs = recs
+        self.chain = active_chain(recs)
+        self.siblings = tool_siblings(recs, self.chain)
+        starts = [k for k, i in enumerate(self.chain) if is_prompt(recs[i])]
+        self.bounds = sorted({0, *starts})
+        self.ends = self.bounds[1:] + [len(self.chain)]
+        # characters a cut of the turn removes; carried attachments stay
+        self.size = [sum(rendered_chars(recs[i]) for i in self.members(t, t + 1)
+                         if not is_carried(recs[i]))
+                     for t in range(len(self))]
+        # a cut may start or end at turn t only if no tool call before t is
+        # still waiting for a result that comes after t
+        answered = tool_ids(recs, self.members(0, len(self)))[1]
+        self.clean, uses, results = [], set(), set()
+        for t in range(len(self)):
+            self.clean.append(not ((uses & answered) - results))
+            u, r = tool_ids(recs, self.members(t, t + 1))
+            uses |= u
+            results |= r
+
+    def __len__(self) -> int:
+        return len(self.bounds)
+
+    def members(self, a: int, b: int) -> list[int]:
+        """Record indexes of turns a..b-1, chain records and their siblings."""
+        if a >= b:
+            return []
+        out = []
+        for k in range(self.bounds[a], self.ends[b - 1]):
+            out.append(self.chain[k])
+            out.extend(self.siblings.get(self.chain[k], []))
+        return out
+
+    def first(self, t: int) -> int:
+        return self.chain[self.bounds[t]]
+
+
+def descendants(recs: list[dict], roots: set[int], stop: set[int]) -> set[int]:
+    """Indexes of `roots` and every record below them, not descending into `stop`."""
+    by = {r["uuid"]: i for i, r in enumerate(recs) if r.get("uuid")}
+    children = {}
+    for i, r in enumerate(recs):
+        if r.get("uuid") and r.get("parentUuid") in by:
+            children.setdefault(by[r["parentUuid"]], []).append(i)
+    out, todo = set(), list(roots)
+    while todo:
+        i = todo.pop()
+        if i in out or i in stop:
+            continue
+        out.add(i)
+        todo.extend(children.get(i, []))
+    return out
+
+
+def add_note(rec: dict, note: str) -> None:
+    msg = rec["message"]
+    if isinstance(msg.get("content"), str):
+        msg["content"] = f"{note}\n\n{msg['content']}"
+        return
+    for b in msg["content"]:
+        if isinstance(b, dict) and b.get("type") == "text":
+            b["text"] = f"{note}\n\n{b.get('text', '')}"
+            return
+    msg["content"].insert(0, {"type": "text", "text": note})
+
+
+def cut_range(turns: Turns, args) -> tuple[int, int]:
+    """Turns a..b-1 (0-based) to cut, both ends moved onto clean boundaries."""
+    n = len(turns)
+    clean = [t for t in range(1, n) if turns.clean[t]]
+    if args.from_turn or args.to_turn:
+        if not (args.from_turn and args.to_turn):
+            sys.exit("--from and --to go together")
+        if not 2 <= args.from_turn <= args.to_turn <= n - 1:
+            sys.exit(f"need 2 <= --from <= --to <= {n - 1} "
+                     f"(turn 1 and the last turn always stay; see --list)")
+        a = next((t for t in clean if t >= args.from_turn - 1), None)
+        b = next((t for t in reversed(clean) if t <= args.to_turn), None)
+    else:
+        if not 0 < args.drop < 1:
+            sys.exit("--drop is a fraction between 0 and 1")
+        if not 1 <= args.keep_head < n - 1:
+            sys.exit(f"--keep-head must be between 1 and {n - 2} for this "
+                     f"conversation ({n} turns)")
+        a = next((t for t in clean if t >= args.keep_head), None)
+        b = None
+        if a is not None:
+            target = args.drop * sum(turns.size[a:])
+            cands = [t for t in clean if t > a]
+            if cands:
+                b = min(cands, key=lambda t: abs(sum(turns.size[a:t]) - target))
+    if a is None or b is None or b <= a:
+        sys.exit("no clean cut fits that range: a tool call is still waiting for "
+                 "its result at every boundary in it. See --list for clean turns")
+    return a, b
+
+
+def print_turns(turns: Turns) -> None:
+    recs = turns.recs
+    print(f"{'TURN':>5} {'REC':>6} {'TIME':<16} {'CHARS':>9}  CUT  PROMPT")
+    for t in range(len(turns)):
+        rec = recs[turns.first(t)]
+        text = " ".join(first_text(rec).split())
+        print(f"{t + 1:>5} {turns.first(t):>6} {str(rec.get('timestamp', ''))[:16]:<16} "
+              f"{turns.size[t]:>9,}  {' ok' if turns.clean[t] else '  -'}  {text[:70]}")
+    print(f"\n{len(turns)} turns, {sum(turns.size):,} chars. CUT ok: a cut may "
+          f"start or end at this turn.")
+
+
+def cmd_cut(args) -> None:
+    recs = load(args.path)
+    turns = Turns(recs)
+    if args.list:
+        print_turns(turns)
+        return
+    if not (args.drop or args.from_turn or args.to_turn):
+        sys.exit("pick --drop F (with --keep-head N) or --from A --to B; "
+                 "--list shows the turns")
+    a, b = cut_range(turns, args)
+
+    cut = turns.members(a, b)
+    head_last = turns.chain[turns.bounds[a] - 1]
+    tail_first = turns.first(b)
+    kept = turns.members(0, a) + turns.members(b, len(turns))
+
+    carried = [i for i in cut if is_carried(recs[i])]
+    cut_chars = sum(turns.size[a:b])
+    total_chars = sum(turns.size)
+    last_ctx = next((c for c in map(context_tokens, reversed(recs)) if c), 0)
+    est = max(last_ctx - int(cut_chars / DENSE_CHARS_PER_TOKEN), MIN_ESTIMATE)
+    mode = "purge (deleted from the file)" if args.purge else \
+        "branch (stays in the file, unreachable)"
+
+    def prompt(t: int) -> str:
+        return " ".join(first_text(recs[turns.first(t)]).split())[:70]
+
+    print(f"conversation: {len(turns)} turns, {total_chars:,} chars")
+    print(f"  keep turns 1-{a}")
+    print(f"  cut  turns {a + 1}-{b}  {cut_chars:,} chars "
+          f"({cut_chars / total_chars:.0%} of all), {len(cut)} records")
+    print(f"         first cut:  {prompt(a)}")
+    print(f"         first kept: {prompt(b)}")
+    if args.from_turn and (a + 1, b) != (args.from_turn, args.to_turn):
+        print(f"         (asked for {args.from_turn}-{args.to_turn}; moved to the nearest "
+              f"turns marked ok in --list)")
+    print(f"  keep turns {b + 1}-{len(turns)}")
+    if carried:
+        kinds = Counter((recs[i].get("attachment") or {}).get("type") for i in carried)
+        print("  carried over: " + ", ".join(f"{k} x{v}" for k, v in kinds.items()))
+    print(f"  mode: {mode}")
+    if last_ctx:
+        print(f"  context: last request {last_ctx:,} -> ~{est:,} tokens (estimate at "
+              f"{DENSE_CHARS_PER_TOKEN} chars/token)")
+    if not args.yes:
+        print("\nPREVIEW, nothing written. Add --yes to apply.")
+        return
+
+    guard_live(args)
+    n, snap = take_snapshot(args.path)
+    print(f"\nsnapshot -> {os.path.basename(snap)}")
+
+    purged = descendants(recs, set(turns.chain[turns.bounds[a]:turns.bounds[b]]),
+                         {tail_first}) if args.purge else set()
+    copies, parent = [], recs[head_last]["uuid"]
+    for i in carried:
+        c = json.loads(json.dumps(recs[i]))
+        c["uuid"], c["parentUuid"] = str(uuid.uuid4()), parent
+        parent = c["uuid"]
+        copies.append(c)
+
+    new = []
+    for i, r in enumerate(recs):
+        if i in purged:
+            continue
+        if i == tail_first:
+            new.extend(copies)
+            r = json.loads(json.dumps(r))
+            r["parentUuid"] = parent
+            if not args.no_note:
+                add_note(r, CUT_NOTE.format(n=b - a))
+        new.append(r)
+
+    reset = None
+    if last_ctx and not args.no_reset_usage and est < last_ctx:
+        reset = reset_usage(new, est)
+
+    expect = [recs[i]["uuid"] for i in turns.chain[:turns.bounds[a]]] \
+        + [c["uuid"] for c in copies] + [recs[i]["uuid"] for i in turns.chain[turns.bounds[b]:]]
+    kept_thinking = thinking_fingerprint([r for i, r in enumerate(recs) if i not in purged])
+    tmp = args.path + ".tmp"
+    dump(new, tmp)
+    problem = validate_cut(load(tmp), recs, purged, copies, tail_first, expect, kept_thinking,
+                           [recs[i].get("uuid") for i in kept])
+    if problem:
+        os.remove(tmp)
+        sys.exit(f"FATAL: {problem}\nOriginal file untouched.")
+    shutil.copymode(args.path, tmp)
+    os.replace(tmp, args.path)
+
+    print(f"cut turns {a + 1}-{b} ({b - a} turns), {mode}")
+    if copies:
+        print(f"carried over {len(copies)} state attachments")
+    if reset:
+        print(f"usage reset: last request {last_ctx:,} -> ~{est:,} tokens on "
+              f"{len(reset)} records (the next real reply corrects it)")
+    print(f"\nsize {mb(os.path.getsize(snap))} -> {mb(os.path.getsize(args.path))}")
+    print(f"rollback: cc_prune.py restore {os.path.basename(args.path)} {n}")
+    print("\nNow: resume the session, send a REAL message (not a slash command),\n"
+          "and read the status bar. Do not use /context to verify.")
+
+
+def validate_cut(new: list[dict], old: list[dict], purged: set[int], copies: list[dict],
+                 tail_first: int, expect: list, thinking: list, kept: list) -> str | None:
+    copy_ids = [c["uuid"] for c in copies]
+    originals = [r for r in new if r.get("uuid") not in copy_ids]
+    survivors = [r for i, r in enumerate(old) if i not in purged]
+    if len(originals) != len(survivors):
+        return f"record count changed: expected {len(survivors)}, got {len(originals)}"
+    for r, s in zip(originals, survivors):
+        if r.get("uuid") != s.get("uuid"):
+            return "uuid order changed"
+        if r.get("parentUuid") != s.get("parentUuid") and r.get("uuid") != old[tail_first]["uuid"]:
+            return f"parentUuid of {r.get('uuid')} changed"
+    if [r.get("uuid") for r in new if r.get("uuid") in copy_ids] != copy_ids:
+        return "carried attachments missing or out of order"
+    if thinking_fingerprint(new) != thinking:
+        return "thinking blocks altered -- the API would reject this"
+    turns = Turns(new)
+    if [new[i]["uuid"] for i in turns.chain] != expect:
+        return "the resumed conversation would not be head + carried + tail"
+    conv = [i for t in range(len(turns)) for i in turns.members(t, t + 1)]
+    if sorted(new[i].get("uuid") for i in conv if new[i].get("uuid") not in copy_ids) \
+            != sorted(kept):
+        return "the resumed conversation would load records outside head and tail"
+    uses, results = tool_ids(new, conv)
+    if not results <= uses:
+        return "a kept tool_result lost its tool_use"
+    all_uses = {b["id"] for r in new for b in blocks(r)
+                if b.get("type") == "tool_use" and b.get("id")}
+    all_results = {b.get("tool_use_id") for r in new for b in blocks(r)
+                   if b.get("type") == "tool_result"}
+    if not all_results <= all_uses:
+        return "tool_use / tool_result pairing broken"
+    return None
+
+
+# --------------------------------------------------------------------------
 
 def main() -> None:
     p = argparse.ArgumentParser(
@@ -1233,6 +1589,31 @@ def main() -> None:
     sc.add_argument("--force", action="store_true",
                     help="edit a transcript even if a running session has it open")
 
+    ct = sub.add_parser("cut", help="cut a stretch of turns out of the middle "
+                                    "(previews unless --yes)")
+    ct.add_argument("path")
+    ct.add_argument("--list", action="store_true",
+                    help="list the turns of the active conversation and exit")
+    ct.add_argument("--keep-head", type=int, default=5, metavar="N",
+                    help="turns at the start that always stay (default 5)")
+    ct.add_argument("--drop", type=float, default=0, metavar="F",
+                    help="cut this fraction of the conversation after the head, "
+                         "by size, starting right after it")
+    ct.add_argument("--from", dest="from_turn", type=int, default=0, metavar="A",
+                    help="first turn to cut (turn numbers from --list)")
+    ct.add_argument("--to", dest="to_turn", type=int, default=0, metavar="B",
+                    help="last turn to cut, inclusive")
+    ct.add_argument("--purge", action="store_true",
+                    help="delete the cut records from the file instead of "
+                         "leaving them as an unreachable branch")
+    ct.add_argument("--no-note", action="store_true",
+                    help="do not mark the cut in the first kept prompt")
+    ct.add_argument("--yes", action="store_true", help="apply instead of previewing")
+    ct.add_argument("--force", action="store_true",
+                    help="edit a transcript even if a running session has it open")
+    ct.add_argument("--no-reset-usage", action="store_true",
+                    help="leave the recorded usage alone")
+
     d = sub.add_parser("density", help="derive chars/token from a measured cut")
     d.add_argument("--before", type=int, required=True)
     d.add_argument("--after", type=int, required=True)
@@ -1253,7 +1634,7 @@ def main() -> None:
         return
     {"sessions": cmd_sessions, "usage": cmd_usage, "inspect": cmd_inspect, "clear": cmd_clear,
      "reset-usage": cmd_reset_usage, "snapshots": cmd_snapshots, "restore": cmd_restore, "audit": cmd_audit,
-     "strip-commands": cmd_strip_commands, "density": cmd_density}[args.cmd](args)
+     "strip-commands": cmd_strip_commands, "cut": cmd_cut, "density": cmd_density}[args.cmd](args)
 
 
 if __name__ == "__main__":
