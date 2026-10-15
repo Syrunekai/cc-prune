@@ -388,7 +388,9 @@ def session_title(path: str, objs: list[dict]) -> str | None:
     best = None
     for o in objs:
         t = o.get("type")
-        if t == "ai-title":
+        if t == "custom-title":
+            cand = (3, (o.get("customTitle") or "").strip())
+        elif t == "ai-title":
             cand = (2, (o.get("aiTitle") or "").strip())
         elif t == "summary":
             cand = (1, (o.get("summary") or "").strip())

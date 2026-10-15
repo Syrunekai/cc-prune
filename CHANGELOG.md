@@ -22,6 +22,9 @@
   the cut stretch is added to the new count (it used to be dropped with its turn), and a
   note already on the first kept prompt is merged instead of stacked. The preview shows
   the earlier total.
+- `sessions` showed the auto-generated title for a renamed session. `custom-title` records
+  inside the transcript are now read and win over `ai-title` and `summary`; the latest
+  one counts.
 
 ## 0.2.1 (2026-10-14)
 
