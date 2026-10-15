@@ -12,6 +12,10 @@
   snapshot that still holds real counts. The result is lowered by 2.5%. The old estimate
   (removed characters at 1.5 chars/token) was up to 12% over the real count; on 27 real
   before/after pairs the new one was under on every pair, by 0.3% to 15%.
+- README is back to the original's structure and length, plus the Quick start. The
+  Troubleshooting section, the `cut` documentation and the usage-estimate explanation moved
+  to `docs/troubleshooting.md`, `docs/cut.md` and `docs/estimate.md`, with short sections
+  in the README linking to them.
 - Records whose usage cc-prune rewrote carry `"ccPruneEstimate": true`.
 - Character counts for tool results and attachments no longer include JSON keys and
   escaping, which changes the sizes `cut --list` shows and the `--drop` boundaries a little.
