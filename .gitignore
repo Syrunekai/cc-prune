@@ -5,3 +5,6 @@ __pycache__/
 *.pyc
 .venv/
 sessions/
+.pytest_cache/
+dist/
+*.egg-info/

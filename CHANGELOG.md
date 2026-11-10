@@ -1,5 +1,37 @@
 # Changelog
 
+## 0.4.0 (2026-11-10)
+
+### Changed
+
+- `clearcut` is one pass over the records, not a `cut` followed by a `clear`. It plans the
+  cut and the clear in memory, validates once, takes one snapshot and writes once, and it
+  prints one report: the cut, the clear's hit counts and the estimated context, then the
+  snapshot, the usage reset, the size and the rollback line. The preview shows the clear's
+  real hit counts instead of the flags it would run with. On real transcripts the file is
+  byte-identical to the old two-step result; where the clear frees enough to rescale the
+  recorded usage a second time, the single pass rescales it once, which moved two usage
+  numbers by 1 token in one test.
+- The tool is a package (`src/ccprune/`) and a `uv` project. The engine (`prune`, `clear`,
+  `cut`, `estimate`, `sessions`, `snapshots`, `guard`, `analysis`, `maintenance`) takes
+  explicit options, returns plain data and raises `PruneError`; `cli.py` only parses
+  arguments and prints. `cc_prune.py` stays as a shim, so `python3 cc_prune.py ...` runs
+  from a checkout without installing anything. `uv run cc-prune ...` works too.
+- A transcript is validated before the snapshot is taken, so a refused edit no longer
+  leaves a snapshot behind.
+- The settings (`PROJECTS_ROOT`, `SESSIONS_DIR`, `LIVE_IF_EDITED_WITHIN`) moved to
+  `src/ccprune/settings.py`.
+- Rollback lines name the command as it was run (`cc_prune.py` or `cc-prune`).
+
+### Added
+
+- Tests (`uv run pytest`) on a synthetic transcript: clear counts, plan writes nothing,
+  clearcut equals a cut then a clear, one snapshot, validation failure, restore, the guard.
+
+### Removed
+
+- The hidden `clear --no-snapshot`, which only the old `clearcut` used.
+
 ## 0.3.0 (2026-10-30)
 
 ### Added

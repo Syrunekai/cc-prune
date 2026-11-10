@@ -98,7 +98,7 @@ that looks live, unless you pass `--force`. Two independent signals are used:
   (macOS) only existence is checked, and on Windows nothing can be, so a registered session
   is assumed running.
 - **Recent edits.** A transcript modified within the last `LIVE_IF_EDITED_WITHIN` seconds
-  (a setting near the top of `cc_prune.py`, default 30, `0` turns it off) is treated as live.
+  (a setting in `src/ccprune/settings.py`, default 30, `0` turns it off) is treated as live.
   This catches a stale registry. The tool's own writes count too, so a second edit of the
   same transcript within that window needs a short wait or `--force`.
 

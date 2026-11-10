@@ -56,7 +56,16 @@ cd cc-prune
 python3 cc_prune.py --version
 ```
 
-Python 3.9+, no dependencies.
+Python 3.9+, no dependencies. `cc_prune.py` runs straight from the checkout; to work on the
+code or get a `cc-prune` command instead, use [uv](https://docs.astral.sh/uv/):
+
+```bash
+uv run cc-prune --version     # runs from the project environment
+uv run pytest                 # the tests
+```
+
+The tool is a package (`src/ccprune/`) with the CLI as one front end over it: the engine
+returns plain data, `cli.py` only parses arguments and prints.
 
 ---
 
@@ -298,6 +307,19 @@ python3 cc_prune.py cut "$F" --keep-head 5 --drop 0.5 --yes  # apply
 The model loses everything in the cut turns, and the first kept prompt gets a note saying
 so. Details, flags and what was tested: [docs/cut.md](docs/cut.md).
 
+`clearcut` does a cut and a clear in one pass: one plan, one snapshot, one write, one
+report. It cuts with `--purge`, keeps the first turn, then clears tool results, tool inputs
+and images in what is left:
+
+```bash
+python3 cc_prune.py clearcut "$F" --drop 0.5 --keep-tail 0.5          # preview, nothing written
+python3 cc_prune.py clearcut "$F" --drop 0.5 --keep-tail 0.5 --yes    # apply
+python3 cc_prune.py restore "$F" 0                                    # undo the whole thing
+```
+
+`--keep-tail` protects the newest fraction of the records from the clear. The preview shows
+the cut, the clear's hit counts and the estimated context, so it needs no second look.
+
 ---
 
 ## Preventing the problem
@@ -328,7 +350,7 @@ restore FILE N                 restore snapshot N
 audit FILE LINE...             is this specific result safe to clear?
 strip-commands FILE --orphans  clear /context, /cost output
 cut FILE --drop F | --from A --to B   cut a stretch of turns (previews unless --yes)
-clearcut FILE --drop F         cut, then clear, with one snapshot (previews unless --yes)
+clearcut FILE --drop F         cut and clear in one pass, one snapshot (previews unless --yes)
 density --before --after --mb  derive chars/token from a measured cut
 ```
 
