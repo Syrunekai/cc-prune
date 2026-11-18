@@ -51,7 +51,7 @@ drop the block).
 ## Install
 
 ```bash
-git clone https://github.com/QihanZhao/cc-prune
+git clone https://github.com/Syrunekai/cc-prune
 cd cc-prune
 ./cc-prune --version
 ```
@@ -509,4 +509,5 @@ Please redact paths and project names first — transcripts contain your work.
 
 ## License
 
-MIT
+MIT. cc-prune was started by Qihan Zhao ([QihanZhao/cc-prune](https://github.com/QihanZhao/cc-prune));
+this fork, from 0.2 on, is maintained by Syrunekai. Both are named in [LICENSE](LICENSE).
