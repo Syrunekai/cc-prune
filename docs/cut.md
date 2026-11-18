@@ -5,10 +5,10 @@ stretch of whole turns from the middle and keeps the start and the recent end ve
 turn is one prompt and everything up to the next prompt.
 
 ```bash
-python3 cc_prune.py cut "$F" --list                          # numbered turns, sizes, prompts
-python3 cc_prune.py cut "$F" --keep-head 5 --drop 0.5        # preview
-python3 cc_prune.py cut "$F" --keep-head 5 --drop 0.5 --yes  # apply
-python3 cc_prune.py cut "$F" --from 6 --to 120 --yes         # exact turns, inclusive
+./cc-prune cut "$F" --list                          # numbered turns, sizes, prompts
+./cc-prune cut "$F" --keep-head 5 --drop 0.5        # preview
+./cc-prune cut "$F" --keep-head 5 --drop 0.5 --yes  # apply
+./cc-prune cut "$F" --from 6 --to 120 --yes         # exact turns, inclusive
 ```
 
 - `--keep-head N` (default 5) keeps the first N turns. `--drop F` then cuts that fraction of

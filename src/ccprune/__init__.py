@@ -11,6 +11,7 @@ front end over it.
     clear / cut  plan_prune, then apply_plan   (cut, clear or both in one pass)
     snapshots    list_snapshots, restore_snapshot
     analysis     usage_rows, inspect_file, audit_lines, density
+    export       read_transcript, render, write_export
 
 Invariants held by every mutating operation except a cut:
   * no line is ever deleted           -> uuid / parentUuid chain intact
@@ -31,7 +32,7 @@ the snapshot until you have confirmed the session still resumes.
 """
 from __future__ import annotations
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 from .errors import PruneError
 from .prune import Plan, apply_plan, plan_prune

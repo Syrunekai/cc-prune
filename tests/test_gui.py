@@ -333,3 +333,150 @@ def test_rows_keep_their_text_color_when_selected_and_hover_covers_the_row(world
     QApplication.sendEvent(v.viewport(), QEvent(QEvent.Type.Leave))
     assert d.hover_row == -1
     assert w.sessions.model.headerData(2, Qt.Orientation.Horizontal) == "Live"
+
+
+# ---- the Export tab
+
+@pytest.fixture
+def export_env(tmp_path, monkeypatch):
+    env = tmp_path / ".env"
+    out = tmp_path / "out"
+    env.write_text(f"""CC_PRUNE_EXPORT_DIRS='[{{"name": "main", "path": "{out}"}}]'\n""")
+    monkeypatch.setenv("CC_PRUNE_ENV", str(env))
+    for key in ("CC_PRUNE_EXPORT_DIRS", "CC_PRUNE_EXPORT_DEFAULT", "CC_PRUNE_USER_NAME",
+                "CC_PRUNE_ASSISTANT_NAME", "CC_PRUNE_TIMEZONE"):
+        monkeypatch.delenv(key, raising=False)
+    return env, out
+
+
+def open_export(app, w, session):
+    w.tabs.setCurrentWidget(w.export_panel)
+    path = next(r.path for r in w.sessions.model.rows if r.session_id == session)
+    w.sessions.select_path(path)
+    assert wait(app, lambda: getattr(w, "export_transcript", None) is not None
+                and w.row and w.row.session_id == session), "no export preview"
+    return path
+
+
+def test_export_tab_previews_and_writes_into_the_default_folder(world, export_env, app, monkeypatch):
+    make, paths = world
+    env, out = export_env
+    w = make()
+    open_export(app, w, A)
+    p = w.export_panel
+    assert p.named() == "main" and p.target().startswith(str(out))
+    assert w.preview.pages.currentWidget() is w.preview.markdown
+    assert "### Operator" in w.preview.markdown.toPlainText()
+    assert w.preview.big.text() == "20 messages"
+    assert p.command.toPlainText().endswith('export "$F"')
+    assert not p.before.isChecked() and p.summary.isChecked()
+    p.summary.setChecked(False)
+    assert wait(app, lambda: p.command.toPlainText().endswith('export "$F" --no-summary'))
+    p.before.setChecked(True)
+    assert not p.summary.isChecked(), "turning the history on unchecks the summary"
+    assert wait(app, lambda: p.command.toPlainText().endswith('export "$F" --history'))
+    p.summary.setChecked(True)
+    assert wait(app, lambda: p.command.toPlainText().endswith('export "$F" --history --summary'))
+    p.before.setChecked(False)
+    assert p.summary.isChecked(), "turning the history off checks the summary"
+    from ccprune.gui.state import load_section
+    assert "summary" not in load_section("export")
+    assert wait(app, lambda: p.export.isEnabled())
+    before = open(paths[A], "rb").read()
+    p.export.click()
+    assert wait(app, lambda: out.exists() and os.listdir(out))
+    assert wait(app, lambda: not w.exporting and p.export.text() == "Overwrite…")
+    assert open(paths[A], "rb").read() == before
+    assert "exported 20 of 20 messages" in w.preview.report.toPlainText()
+
+    asked = []
+    monkeypatch.setattr(QMessageBox, "question", staticmethod(
+        lambda *a, **k: asked.append(a) or QMessageBox.StandardButton.No))
+    p.export.click()
+    assert asked and not w.exporting
+
+
+def test_export_options_change_the_preview_and_the_command(world, export_env, app):
+    make, _ = world
+    w = make()
+    open_export(app, w, A)
+    p = w.export_panel
+    p.trim_tail.setChecked(True)
+    p.count.setValue(3)
+    p.raw.setChecked(True)
+    assert wait(app, lambda: w.preview.big.text().startswith("3 messages of"))
+    assert "--raw" in p.command.toPlainText() and "--tail 3" in p.command.toPlainText()
+    p.name.setText("mine")
+    assert wait(app, lambda: p.target().endswith("/mine.md"))
+    assert p.target() in p.command.toPlainText()
+    from ccprune.gui.state import load_section
+    assert load_section("export")["trim"] == "tail"
+
+
+def test_saving_a_folder_by_name_writes_the_env_file(world, export_env, app, monkeypatch, tmp_path):
+    from PySide6.QtWidgets import QFileDialog, QInputDialog
+    make, _ = world
+    env, _ = export_env
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    w = make()
+    open_export(app, w, A)
+    p = w.export_panel
+    monkeypatch.setattr(QFileDialog, "getExistingDirectory", staticmethod(lambda *a, **k: str(other)))
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("notes", True)))
+    p.browse.click()
+    assert p.folder.currentData() != "main" and p.target().startswith(str(other))
+    assert p.save_folder.isEnabled()
+    p.save_folder.click()
+    text = env.read_text()
+    assert '"name": "notes"' in text and "CC_PRUNE_EXPORT_DEFAULT='main'" in text
+    assert p.named() == "notes"
+    p.make_default.click()
+    assert "CC_PRUNE_EXPORT_DEFAULT='notes'" in env.read_text()
+    assert not p.make_default.isEnabled()
+
+
+def test_a_live_session_can_still_be_exported(world, export_env, app, tmp_path):
+    make, paths = world
+    pid = os.getpid()
+    start = open(f"/proc/{pid}/stat").read().rsplit(")", 1)[1].split()[19]
+    reg = tmp_path / "registry"
+    reg.mkdir()
+    (reg / f"{pid}.json").write_text(json.dumps({"pid": pid, "sessionId": A, "procStart": start}))
+    w = make()
+    open_export(app, w, A)
+    assert w.export_panel.export.isEnabled()
+    assert "live" in w.preview.confidence.text()
+
+
+def test_switching_back_to_prune_shows_the_plan(world, export_env, app):
+    make, _ = world
+    w = make()
+    select(app, w, A)
+    w.tabs.setCurrentWidget(w.export_panel)
+    assert wait(app, lambda: w.preview.pages.currentWidget() is w.preview.markdown)
+    w.tabs.setCurrentWidget(w.panel)
+    assert w.preview.pages.currentWidget() is w.preview.details
+    assert "Cut" in w.preview.details.toPlainText()
+
+
+def test_no_folder_configured_asks_for_one(world, app, tmp_path, monkeypatch):
+    monkeypatch.setenv("CC_PRUNE_ENV", str(tmp_path / "none.env"))
+    monkeypatch.delenv("CC_PRUNE_EXPORT_DIRS", raising=False)
+    make, _ = world
+    w = make()
+    open_export(app, w, A)
+    assert not w.export_panel.export.isEnabled()
+    assert "Choose a folder" in w.export_panel.status.text()
+    assert "No named folders yet" in w.export_panel.env_note.text()
+
+
+def test_the_summary_choice_is_not_remembered(world, export_env, app):
+    from ccprune.gui.state import save_section
+    save_section("export", {"before_compaction": True, "summary": True})
+    make, _ = world
+    w = make()
+    assert w.export_panel.before.isChecked() and not w.export_panel.summary.isChecked()
+    save_section("export", {"before_compaction": False, "summary": False})
+    w2 = make()
+    assert w2.export_panel.summary.isChecked()

@@ -5,12 +5,14 @@ from __future__ import annotations
 import os
 import time
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtWidgets import (QHBoxLayout, QLabel, QMainWindow, QMessageBox, QPushButton,
-                               QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtCore import QTimer, Qt, QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import (QLabel, QMainWindow, QMessageBox, QPushButton, QSplitter,
+                               QTabWidget, QVBoxLayout, QWidget)
 
 from .. import settings as engine_settings
 from ..calibration import reconcile
+from ..export import default_filename, read_transcript, render, write_export
 from ..favorites import load_favorites, set_favorite
 from ..guard import live_reasons
 from ..prune import apply_plan, load_transcript, plan_prune
@@ -20,20 +22,23 @@ from ..transcript import first_text
 from ..turns import Turns
 from . import fmt
 from .drawer import Drawer, TurnInfo
+from .export_panel import ExportPanel, ExportSettings
 from .preview import PreviewPanel
 from .sessions import SessionRow, SessionsPanel, to_rows
 from .settings_panel import SettingsPanel
-from .state import load_settings, save_settings
+from .state import load_section, load_settings, save_section, save_settings
 from .workers import run_async
 
 PREVIEW_DELAY_MS = 250
+# characters of the transcript shown in the export preview
+EXPORT_PREVIEW_CHARS = 80_000
 
 
 def repo_dir() -> str:
-    """The checkout that holds cc_prune.py, or '' when installed as a package."""
+    """The checkout that holds cc-prune, or '' when installed as a package."""
     here = os.path.dirname(os.path.abspath(__file__))
     top = os.path.abspath(os.path.join(here, "..", "..", ".."))
-    return top if os.path.exists(os.path.join(top, "cc_prune.py")) else ""
+    return top if os.path.exists(os.path.join(top, "cc-prune")) else ""
 
 
 class MainWindow(QMainWindow):
@@ -56,12 +61,20 @@ class MainWindow(QMainWindow):
         self.sessions = SessionsPanel()
         self.preview = PreviewPanel()
         self.panel = SettingsPanel(load_settings())
+        self.export_panel = ExportPanel(ExportSettings.from_dict(load_section("export")))
+        self.tabs = QTabWidget()
+        self.tabs.addTab(self.panel, "Prune")
+        self.tabs.addTab(self.export_panel, "Export")
+        self.tabs.setFixedWidth(384)
         self.drawer = Drawer()
+        self.exporting = False
+        self.last_export_dir = ""
+        self._export_gen = 0
 
         top = QSplitter(Qt.Orientation.Horizontal)
         top.addWidget(self.sessions)
         top.addWidget(self.preview)
-        top.addWidget(self.panel)
+        top.addWidget(self.tabs)
         top.setStretchFactor(0, 2)
         top.setStretchFactor(1, 3)
         top.setStretchFactor(2, 0)
@@ -90,6 +103,8 @@ class MainWindow(QMainWindow):
 
         self.debounce = QTimer(self, singleShot=True, interval=PREVIEW_DELAY_MS)
         self.debounce.timeout.connect(self.run_preview)
+        self.export_debounce = QTimer(self, singleShot=True, interval=PREVIEW_DELAY_MS)
+        self.export_debounce.timeout.connect(self.run_export_preview)
         self.tick = QTimer(self, interval=1000)
         self.tick.timeout.connect(self.on_tick)
         self.tick.start()
@@ -100,6 +115,10 @@ class MainWindow(QMainWindow):
         self.panel.changed.connect(self.on_panel_changed)
         self.panel.applyClicked.connect(self.on_apply)
         self.panel.cancelClicked.connect(self.disarm)
+        self.tabs.currentChanged.connect(self.on_mode)
+        self.export_panel.changed.connect(self.on_export_changed)
+        self.export_panel.exportClicked.connect(self.on_export)
+        self.export_panel.open_folder.clicked.connect(self.open_export_folder)
         self.drawer_button.toggled.connect(self.toggle_drawer)
         self.drawer.timeline.rangeChosen.connect(self.panel.set_turn_range)
         self.drawer.snapshots.restoreRequested.connect(self.on_restore)
@@ -150,6 +169,8 @@ class MainWindow(QMainWindow):
         self.row, self.plan, self.loaded = row, None, None
         self.armed = False
         self._fresh_selection = True
+        self.export_panel.name.clear()
+        self.export_panel.set_auto_name("")
         if row is None:
             self.preview.show_message("Select a session on the left.")
             self.update_apply()
@@ -186,6 +207,8 @@ class MainWindow(QMainWindow):
             self.drawer.timeline.set_manual(self.panel.settings().method == "turns")
             self.drawer.snapshots.set_snapshots(snaps)
             self.schedule_preview()
+            if self.exporting_mode():
+                self.schedule_export_preview()
 
         def failed(msg):
             if gen == self._load_gen:
@@ -230,7 +253,9 @@ class MainWindow(QMainWindow):
         cut = s.cut_options(len(self.turns)) if s.cut_on else None
         clear = s.clear_options()
         if cut is None and clear is None:
-            self.preview.show_message("Nothing is selected: turn on the cut or pick something to clear.", row)
+            if not self.exporting_mode():
+                self.preview.show_message("Nothing is selected: turn on the cut or pick something "
+                                          "to clear.", row)
             self.update_apply()
             return
         self._plan_gen += 1
@@ -240,7 +265,8 @@ class MainWindow(QMainWindow):
             if gen != self._plan_gen:
                 return
             self.plan = plan
-            self.preview.show_plan(row, plan, self.history)
+            if not self.exporting_mode():
+                self.preview.show_plan(row, plan, self.history)
             if plan.cut and s.method == "fraction":
                 self.drawer.timeline.set_range(plan.cut.a + 1, plan.cut.b)
             self.update_apply()
@@ -249,8 +275,9 @@ class MainWindow(QMainWindow):
             if gen != self._plan_gen:
                 return
             self.plan = None
-            self.preview.show_message(msg.splitlines()[0] if msg.startswith(("pick", "--", "need", "no clean"))
-                                      else msg, row)
+            if not self.exporting_mode():
+                self.preview.show_message(msg.splitlines()[0] if msg.startswith(
+                    ("pick", "--", "need", "no clean")) else msg, row)
             self.update_apply()
 
         run_async(lambda: plan_prune(row.path, cut=cut, clear=clear, reset_usage=s.reset_usage,
@@ -420,3 +447,137 @@ class MainWindow(QMainWindow):
             return
         set_pinned(self.row.path, n, pinned)
         self.drawer.snapshots.set_snapshots(list_snapshots(self.row.path))
+
+    # ---- export
+
+    def exporting_mode(self) -> bool:
+        return self.tabs.currentWidget() is self.export_panel
+
+    def on_mode(self, _index: int) -> None:
+        if self.exporting_mode():
+            self.export_panel.reload_config()
+            self.schedule_export_preview()
+        elif self.row is not None and self.loaded is not None:
+            if self.plan is not None:
+                self.preview.show_plan(self.row, self.plan, self.history)
+            else:
+                self.schedule_preview()
+
+    def on_export_changed(self) -> None:
+        save_section("export", self.export_panel.settings().to_dict())
+        if self.exporting_mode():
+            self.schedule_export_preview()
+
+    def schedule_export_preview(self) -> None:
+        self._export_gen += 1
+        self.update_export_command()
+        self.update_export_button(updating=self.loaded is not None)
+        if self.row is None:
+            self.preview.show_message("Select a session on the left.")
+            return
+        if self.loaded is None:
+            return
+        self.export_debounce.start()
+
+    def run_export_preview(self) -> None:
+        if self.loaded is None or self.row is None or not self.exporting_mode():
+            return
+        row, records = self.row, self.loaded.records
+        try:
+            opts = self.export_panel.options()
+            opts.check()
+        except Exception as exc:
+            self.preview.show_message(str(exc), row)
+            self.update_export_button()
+            return
+        gen = self._export_gen
+
+        def work():
+            t = read_transcript(row.path, opts, records=records)
+            return t, render(t, opts, limit=EXPORT_PREVIEW_CHARS), default_filename(t)
+
+        def done(res):
+            if gen != self._export_gen or not self.exporting_mode():
+                return
+            t, text, name = res
+            self.export_transcript = t
+            self.export_panel.set_auto_name(name)
+            target = self.export_panel.target()
+            self.preview.show_export(row, len(t.shown), len(t.messages), t.trim_note,
+                                     t.compactions, target, bool(target) and os.path.exists(target),
+                                     text, bool(row.live), t.history, t.summary)
+            self.update_export_command()
+            self.update_export_button()
+
+        def failed(msg):
+            if gen == self._export_gen:
+                self.preview.show_message("Could not read this session: " + msg.strip().splitlines()[-1], row)
+                self.update_export_button()
+
+        self.export_transcript = None
+        run_async(work, done, failed)
+
+    def update_export_command(self) -> None:
+        p = self.export_panel
+        if self.row is None or not p.target():
+            p.set_command("")
+            return
+        p.set_command(p.settings().command(self.row.path, p.target(), p.named(),
+                                           p.folders.default, custom_name=bool(p.name.text().strip()),
+                                           summary=p.summary.isChecked()))
+
+    def update_export_button(self, updating: bool = False) -> None:
+        p = self.export_panel
+        t = getattr(self, "export_transcript", None)
+        if self.exporting:
+            return p.set_export(False, "Exporting...")
+        if self.row is None:
+            return p.set_export(False, "Export", "Select a session.")
+        if updating or self.loaded is None or t is None:
+            return p.set_export(False, "Export", "Reading the session...")
+        if not t.shown:
+            return p.set_export(False, "Export", "This session has no messages to export.")
+        target = p.target()
+        if not target:
+            return p.set_export(False, "Export", "Choose a folder.")
+        exists = os.path.exists(target)
+        p.set_export(True, "Overwrite…" if exists else "Export",
+                     f"{os.path.basename(target)} exists." if exists else "")
+
+    def on_export(self) -> None:
+        p, row = self.export_panel, self.row
+        target = p.target()
+        if row is None or not target or self.exporting:
+            return
+        if os.path.exists(target):
+            ask = QMessageBox.question(self, "Overwrite?",
+                                       f"{target}\nalready exists. Overwrite it?")
+            if ask != QMessageBox.StandardButton.Yes:
+                return
+        opts = p.options()
+        self.exporting = True
+        self.update_export_button()
+
+        def work():
+            t = read_transcript(row.path, opts)
+            return write_export(t, target, opts, overwrite=True)
+
+        def done(out):
+            self.exporting = False
+            self.last_export_dir = os.path.dirname(out.path)
+            p.open_folder.setEnabled(True)
+            self.preview.show_report(f"exported {out.messages} of {out.total} messages to "
+                                     f"{out.path} ({out.size / 1024:.1f} KB)")
+            self.update_export_button()
+            p._folder_changed()
+
+        def failed(msg):
+            self.exporting = False
+            self.preview.show_report("NOT EXPORTED: " + msg.strip())
+            self.update_export_button()
+
+        run_async(work, done, failed)
+
+    def open_export_folder(self) -> None:
+        if self.last_export_dir:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(self.last_export_dir))

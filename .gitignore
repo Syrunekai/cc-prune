@@ -8,3 +8,5 @@ sessions/
 .pytest_cache/
 dist/
 *.egg-info/
+.env
+.env.tmp

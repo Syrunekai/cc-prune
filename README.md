@@ -53,19 +53,20 @@ drop the block).
 ```bash
 git clone https://github.com/QihanZhao/cc-prune
 cd cc-prune
-python3 cc_prune.py --version
+./cc-prune --version
 ```
 
-Python 3.9+, no dependencies. Both launchers are executable and start with a
-[uv](https://docs.astral.sh/uv/) shebang, so they run straight from the checkout with no install
+Python 3.9+, no dependencies for the command line. `cc-prune` is executable and starts with a
+[uv](https://docs.astral.sh/uv/) shebang, so it runs straight from the checkout with no install
 and no virtual environment to activate (`uv` must be on your `PATH`):
 
 ```bash
-./cc_prune.py sessions            # the command line
-./cc-prune-gui                    # the window; uv fetches PySide6 on first use
+./cc-prune sessions               # the command line
+./cc-prune --gui                  # the window; uv fetches PySide6 the first time
+./cc-prune-gui                    # the same window, as a file to double-click
 ```
 
-`python3 cc_prune.py ...` works too. To work on the code or get `cc-prune` commands instead:
+`python3 cc-prune ...` works too, without uv, for everything but `--gui`. To work on the code:
 
 ```bash
 uv run cc-prune --version     # runs from the project environment
@@ -85,8 +86,8 @@ returns plain data, `cli.py` only parses arguments and prints.
 2. **Find the transcript.** This lists your sessions, newest first, with their context size:
 
    ```bash
-   python3 cc_prune.py sessions
-   F=$(python3 cc_prune.py sessions --paths --limit 1)   # or the path of the one you want
+   ./cc-prune sessions
+   F=$(./cc-prune sessions --paths --limit 1)   # or the path of the one you want
    ```
 
 3. **Prune.** This is the step that frees context. It clears old tool results and tool
@@ -94,7 +95,7 @@ returns plain data, `cli.py` only parses arguments and prints.
    usage so the session can be resumed:
 
    ```bash
-   python3 cc_prune.py clear "$F" --results 1 --inputs 1 --images --drop-all-thinking --yes
+   ./cc-prune clear "$F" --results 1 --inputs 1 --images --drop-all-thinking --yes
    ```
 
    The thinking flag keeps the file from growing after the resume. A prune makes Claude
@@ -105,7 +106,7 @@ returns plain data, `cli.py` only parses arguments and prints.
 
 4. **Resume, send a real message, and read the context from the status bar.** The number
    the tool printed is an estimate; the first reply replaces it with the API's own count.
-   To undo: `python3 cc_prune.py restore "$F" 0`.
+   To undo: `./cc-prune restore "$F" 0`.
 
 That is the whole job. Everything below is detail.
 
@@ -114,7 +115,7 @@ saved reports, and step 3 stops new ones but leaves those. Wait 30 seconds after
 live-session check counts the tool's own write) and remove them:
 
 ```bash
-python3 cc_prune.py clear "$F" --transformations --keep-tail 0
+./cc-prune clear "$F" --transformations --keep-tail 0
 ```
 
 On a session's first prune there is nothing to remove. The thinking flags are experimental;
@@ -146,9 +147,9 @@ directory is keyed on the working directory the session started in, not the proj
 `sessions` lists them, newest first, with their context size:
 
 ```bash
-python3 cc_prune.py sessions --sort ctx --limit 10   # biggest context first
-python3 cc_prune.py sessions --grep vpn              # match title, prompt, cwd or id
-F=$(python3 cc_prune.py sessions --paths --limit 1)  # newest session
+./cc-prune sessions --sort ctx --limit 10   # biggest context first
+./cc-prune sessions --grep vpn              # match title, prompt, cwd or id
+F=$(./cc-prune sessions --paths --limit 1)  # newest session
 ```
 
 Or by id, without `sessions`:
@@ -160,7 +161,7 @@ F=$(find ~/.claude/projects -name '<session-id>.jsonl' | head -1)
 ### 2. Get the real number
 
 ```bash
-python3 cc_prune.py usage "$F"
+./cc-prune usage "$F"
 ```
 
 `last request` is the input token count the API actually charged. This is the only
@@ -169,7 +170,7 @@ number you should trust. See [The /context trap](#the-context-trap).
 ### 3. See where the bytes are
 
 ```bash
-python3 cc_prune.py inspect "$F"
+./cc-prune inspect "$F"
 ```
 
 Buckets, in rough order of how much they are worth clearing:
@@ -190,7 +191,7 @@ Buckets, in rough order of how much they are worth clearing:
 ### 4. Cut
 
 ```bash
-python3 cc_prune.py clear "$F" --results 500
+./cc-prune clear "$F" --results 500
 ```
 
 `N` is a length threshold in characters: results *longer* than `N` are replaced whole
@@ -219,8 +220,8 @@ claude --resume <session-id>
 ### 6. Roll back if needed
 
 ```bash
-python3 cc_prune.py snapshots "$F"
-python3 cc_prune.py restore  "$F" 0     # 0 = pristine
+./cc-prune snapshots "$F"
+./cc-prune restore  "$F" 0     # 0 = pristine
 ```
 
 Every edit takes one snapshot first and labels it (`cut turns 2-30`, `clear`, ...). An edit that
@@ -230,9 +231,9 @@ changes nothing, such as a clear that matches nothing, writes nothing and takes 
 Snapshot 0, the pristine file, is pinned. Pin any other one to keep it, or delete one:
 
 ```bash
-python3 cc_prune.py snapshots "$F" --pin 3
-python3 cc_prune.py snapshots "$F" --unpin 3
-python3 cc_prune.py snapshots "$F" --delete 3
+./cc-prune snapshots "$F" --pin 3
+./cc-prune snapshots "$F" --unpin 3
+./cc-prune snapshots "$F" --delete 3
 ```
 
 Set `MAX_SNAPSHOTS` in `src/ccprune/settings.py` (0 keeps all, the default) to cap them. After an
@@ -281,7 +282,7 @@ We nearly threw away a successful prune because of this: the status bar read 72%
 `/context` read 98%, and it looked like the context had ballooned back. It hadn't. The
 next real message settled at 72%.
 
-> After editing a transcript, verify with `cc_prune.py usage` or by sending a real
+> After editing a transcript, verify with `cc-prune usage` or by sending a real
 > message. Never with `/context`.
 
 This also means **auto-compaction may fire on the stale estimate**. Consider
@@ -310,7 +311,7 @@ and refuses to guess tokens.
 To learn a bucket's real density in *your* session:
 
 ```bash
-python3 cc_prune.py density --before 867650 --after 570000 --mb 0.45
+./cc-prune density --before 867650 --after 570000 --mb 0.45
 # => 1.51 chars/token for that bucket
 ```
 
@@ -321,8 +322,9 @@ python3 cc_prune.py density --before 867650 --after 570000 --mb 0.45
 A desktop window over the same engine (Linux, needs [PySide6](https://doc.qt.io/qtforpython-6/)):
 
 ```bash
-./cc-prune-gui                         # uv fetches PySide6 on first use
-uv run --extra gui cc-prune-gui        # the same, from the project environment
+./cc-prune --gui                       # uv fetches PySide6 the first time
+./cc-prune-gui                         # a shortcut for the same
+uv run --extra gui cc-prune --gui      # from the project environment
 ```
 
 It can be started by double-clicking `cc-prune-gui` in a file manager that runs executable
@@ -332,7 +334,7 @@ may ask "Run" or "Open").
 - **Sessions** on the left: filter by title or project, click the star to favorite one
   (favorites sort first and have a "★ only" filter). A session registered to a running Claude
   Code process is shown in red.
-- **Settings** on the right, always visible. Whatever is set there is what the next edit uses,
+- **Prune** tab on the right, always visible. Whatever is set there is what the next edit uses,
   and it is saved between runs. Drop and keep-tail are sliders in steps of 0.05, each with a box
   that takes any value. The exact command that makes the same edit is shown under them.
 - **Preview** in the middle: the cut, the clear, the snapshot that will be taken and the
@@ -343,6 +345,11 @@ may ask "Run" or "Open").
   (Ctrl+D). Opening it changes nothing. It has the turn timeline and the snapshots.
   The two-tip range slider there is only used when you choose **By turn range** in the settings
   panel; the tips start at the largest cut and you pull them in.
+
+- **Export** tab next to it: write the selected session as a markdown transcript (see
+  [Export](#export)). Pick one of the named folders, or "Other…" for a one-off folder that
+  "Save as named…" adds to `.env`. The middle shows the transcript as it will be written. Live
+  sessions can be exported; nothing is ever written to the transcript.
 
 After each edit the window records the context it estimated, and the next time you open the
 session it matches that with the real count the API recorded, so the preview shows how the
@@ -356,9 +363,9 @@ When most of what is left is conversation, clearing buckets stops paying. `cut` 
 stretch of whole turns from the middle and keeps the start and the recent end verbatim.
 
 ```bash
-python3 cc_prune.py cut "$F" --list                          # numbered turns, sizes, prompts
-python3 cc_prune.py cut "$F" --keep-head 5 --drop 0.5        # preview
-python3 cc_prune.py cut "$F" --keep-head 5 --drop 0.5 --yes  # apply
+./cc-prune cut "$F" --list                          # numbered turns, sizes, prompts
+./cc-prune cut "$F" --keep-head 5 --drop 0.5        # preview
+./cc-prune cut "$F" --keep-head 5 --drop 0.5 --yes  # apply
 ```
 
 The model loses everything in the cut turns, and the first kept prompt gets a note saying
@@ -369,9 +376,9 @@ report. It cuts with `--purge`, keeps the first turn, then clears tool results, 
 and images in what is left:
 
 ```bash
-python3 cc_prune.py clearcut "$F" --drop 0.5 --keep-tail 0.5          # preview, nothing written
-python3 cc_prune.py clearcut "$F" --drop 0.5 --keep-tail 0.5 --yes    # apply
-python3 cc_prune.py restore "$F" 0                                    # undo the whole thing
+./cc-prune clearcut "$F" --drop 0.5 --keep-tail 0.5          # preview, nothing written
+./cc-prune clearcut "$F" --drop 0.5 --keep-tail 0.5 --yes    # apply
+./cc-prune restore "$F" 0                                    # undo the whole thing
 ```
 
 `--keep-tail` protects the newest fraction of the records from the clear. The preview shows
@@ -394,6 +401,49 @@ export BASH_MAX_OUTPUT_LENGTH=4000     # default is 30000
 
 ---
 
+## Export
+
+`export` writes a session as a readable markdown transcript, the conversation text only by
+default:
+
+```bash
+./cc-prune export "$F" ~/Documents/        # a directory gets <yymmdd-hhmm>-<title>.md
+./cc-prune export 0123abcd                 # by session id (prefix), into the default folder
+./cc-prune export "$F" --to archive --tail 100 --raw
+./cc-prune export "$F" --history           # from the first message, across compactions
+./cc-prune export --folders                # the named folders
+```
+
+It exports what the session actually holds, following the conversation back from the newest
+message. By default it stops at the latest compaction and starts the transcript with that
+compaction's summary, which is what Claude works from now. `--history` (the "History before
+compactions" box in the window) goes back to the first message instead and marks each
+compaction; the summaries are left out, since the messages they summarize are there.
+`--summary` / `--no-summary` override either default. In the window, the "Compaction summary"
+box follows the history box each time it changes (history off checks it, on unchecks it) and is
+never saved, so the choice is made per export. Prompts you rewound
+or edited, turns a branch-mode cut left behind, and subagent sidechains are never in it. `--raw` adds tool calls and results (up to 2,000 characters each), thinking and image
+markers. `--head N` / `--tail N` keep the first or last N messages. Times are local unless
+`--timezone` says otherwise.
+
+Named folders and your defaults live in `.env` in the checkout, which git ignores. Copy
+`.env.example` to `.env` and edit it:
+
+```bash
+CC_PRUNE_EXPORT_DIRS='[
+  {"name": "transcripts", "path": "~/Documents/claude-transcripts"},
+  {"name": "archive", "path": "~/Archive/claude"}
+]'
+CC_PRUNE_EXPORT_DEFAULT=transcripts     # not needed when there is only one folder
+CC_PRUNE_USER_NAME=Operator             # speaker labels in the transcript
+CC_PRUNE_ASSISTANT_NAME=Machine
+```
+
+An installed package reads `~/.config/ccprune/.env`; `CC_PRUNE_ENV` names another file, and a
+variable set in the environment wins over the file.
+
+---
+
 ## Commands
 
 ```
@@ -409,6 +459,8 @@ strip-commands FILE --orphans  clear /context, /cost output
 cut FILE --drop F | --from A --to B   cut a stretch of turns (previews unless --yes)
 clearcut FILE --drop F | --from A --to B   cut and clear in one pass, one snapshot (previews unless --yes)
 density --before --after --mb  derive chars/token from a measured cut
+export FILE [DEST] [--to NAME]  write a markdown transcript (FILE may be a session id)
+--gui                          open the window
 ```
 
 ### `audit`
@@ -416,7 +468,7 @@ density --before --after --mb  derive chars/token from a measured cut
 Before clearing a large result, check whether it matters:
 
 ```bash
-python3 cc_prune.py audit "$F" 2328 2355
+./cc-prune audit "$F" 2328 2355
 ```
 
 Reports which call produced it, whether the source file still exists on disk, whether it
@@ -448,7 +500,7 @@ share, or `usage` finds no fields, please open an issue with your Claude Code ve
 and the output of:
 
 ```bash
-python3 cc_prune.py inspect "$F" | head -30
+./cc-prune inspect "$F" | head -30
 ```
 
 Please redact paths and project names first — transcripts contain your work.

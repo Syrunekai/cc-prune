@@ -132,7 +132,7 @@ class PanelSettings:
             args.append("--yes")
         if repo_dir:
             line = (f"PRUNE_PATH={shlex.quote(repo_dir)} && F={shlex.quote(path)} && "
-                    f'python3 "$PRUNE_PATH/cc_prune.py" ' + " ".join(args))
+                    f'python3 "$PRUNE_PATH/cc-prune" ' + " ".join(args))
         else:
             line = f"F={shlex.quote(path)} && cc-prune " + " ".join(args)
         return f"{line}  # {note}" if note else line
@@ -159,10 +159,34 @@ def load_settings() -> PanelSettings:
         return PanelSettings()
 
 
-def save_settings(panel: PanelSettings) -> None:
+def _read_all() -> dict:
+    try:
+        with open(_file(), encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_key(key: str, value: dict) -> None:
+    data = _read_all()
+    data[key] = value
     path = _file()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"panel": asdict(panel)}, fh, indent=1)
+        json.dump(data, fh, indent=1)
     os.replace(tmp, path)
+
+
+def save_settings(panel: PanelSettings) -> None:
+    _write_key("panel", asdict(panel))
+
+
+def load_section(key: str) -> dict:
+    value = _read_all().get(key)
+    return value if isinstance(value, dict) else {}
+
+
+def save_section(key: str, value: dict) -> None:
+    _write_key(key, value)

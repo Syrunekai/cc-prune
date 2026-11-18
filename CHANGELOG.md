@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.5.0 (2026-11-18)
+
+### Added
+
+- **`export`**: write a session as a markdown transcript, by path or session id, into a
+  directory, a file, a named folder (`--to NAME`) or the default folder. `--raw` adds tool calls
+  and results, thinking and images; `--head` / `--tail N`; `--timezone` (local by default);
+  `--user-name`, `--assistant-name`, `--title`; `--force` to overwrite. The library
+  (`ccprune.export`) started from a standalone transcript extractor, cut down to Claude Code;
+  what it exports is new:
+  - It follows the conversation chain instead of taking every record in the file, so prompts
+    you rewound or edited, records a branch-mode cut left behind and sidechains are left out.
+  - By default it starts at the latest compaction, with that compaction's summary first.
+    `--history` follows every compaction back to the first message (through
+    `logicalParentUuid`), marks each one and leaves the summaries out. `--summary` /
+    `--no-summary` override either default; with both, each summary follows its marker. In the
+    window the summary box follows the history box and is never saved.
+  - In `--raw`, tool results are labeled Tool, not as your messages.
+- **An Export tab in the window**, beside the prune settings (now the Prune tab): named folders,
+  a one-off folder that can be saved by name, a default, the file name, the same options, a
+  preview of the markdown, the equivalent command, and Open folder.
+- **`.env`** (gitignored) for local settings, with `.env.example`: `CC_PRUNE_EXPORT_DIRS`, a JSON
+  array of named folders, `CC_PRUNE_EXPORT_DEFAULT` (the only folder is the default), and the
+  export's speaker labels and time zone. The window writes saved folders back without touching
+  any other line. `CC_PRUNE_ENV` names another file; the environment wins over the file.
+- **`cc-prune --gui`** opens the window. The command line still needs nothing; without PySide6,
+  `--gui` runs again through `uv run --with pyside6`.
+
+### Changed
+
+- **One launcher**: `cc-prune` (executable, uv shebang, no dependencies) is the command line,
+  and the window with `--gui`. `cc-prune-gui` is a shell shortcut for `cc-prune --gui`. The
+  window's commands use `cc-prune`.
+
+### Removed
+
+- `cc_prune.py`. Use `cc-prune` (`python3 cc-prune ...` also works).
+
 ## 0.4.0 (2026-11-18)
 
 ### Added
@@ -11,7 +49,8 @@
   sessions list with favorites, an always-visible settings panel with stepped sliders and the exact
   command for the same edit, a live preview, and a bottom drawer (hidden by default) with the
   by-turn range slider and the snapshots. The turn range is only used when "By turn range" is
-  selected. Apply checks the live-session guard and waits out the recent-edit check on its own.
+  selected. Apply checks the live-session guard and waits out the recent-edit check on its own. The session list draws its own hover and selection, so text stays readable and a
+  selected live session stays red, and a Live column says “● live” in words.
 - `clearcut` takes `--from A --to B`, as `cut` does.
 - Snapshots carry a label and can be pinned, deleted and capped: `snapshots FILE --pin N`,
   `--unpin N`, `--delete N`, and `MAX_SNAPSHOTS` in the settings. Snapshot 0 counts as pinned.

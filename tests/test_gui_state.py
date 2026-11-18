@@ -17,8 +17,8 @@ def private_state(tmp_path, monkeypatch):
 
 
 def argv(cmd: str) -> list[str]:
-    """The cc_prune.py arguments of a generated command, with $F filled in."""
-    tail = cmd.split('cc_prune.py" ', 1)[1].split("  #")[0]
+    """The cc-prune arguments of a generated command, with $F filled in."""
+    tail = cmd.split('/cc-prune" ', 1)[1].split("  #")[0]
     return [a.replace("$F", "/tmp/x.jsonl") for a in shlex.split(tail)]
 
 

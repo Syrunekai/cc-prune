@@ -68,7 +68,6 @@ class SettingsPanel(QWidget):
         super().__init__()
         self._s = settings.normalized()
         self._turns = 0
-        self.setFixedWidth(360)
 
         # ---- cut
         self.cut_group = QGroupBox("Cut")
@@ -137,6 +136,7 @@ class SettingsPanel(QWidget):
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setWidget(inner)
 
         # ---- command and apply

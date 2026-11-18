@@ -2,17 +2,21 @@
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import os
+import re
+import shutil
 import sys
 from datetime import datetime, timedelta, timezone
 
-from . import __version__, settings
+from . import __version__, config, settings
 from .analysis import audit_lines, density, inspect_file
 from .clear import DEFAULT_KEEP_TAIL, ClearOptions, preview_thinking
 from .cut import CutOptions
 from .errors import PruneError
 from .estimate import ESTIMATE_MARGIN
+from .export import ExportOptions, read_transcript, resolve_destination, write_export
 from .guard import check_live
 from .maintenance import apply_strip, plan_strip, reset_usage_file
 from .prune import Applied, Plan, apply_plan, plan_prune
@@ -24,8 +28,7 @@ from .usage import usage_rows
 
 
 def _prog() -> str:
-    name = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else ""
-    return "cc_prune.py" if name == "cc_prune.py" else "cc-prune"
+    return "cc-prune"
 
 
 PROG = _prog()
@@ -503,6 +506,70 @@ def cmd_strip_commands(args) -> None:
 
 # --------------------------------------------------------------------------
 
+# --------------------------------------------------------------------------
+# export
+# --------------------------------------------------------------------------
+
+def resolve_session(target: str) -> str:
+    """A transcript path, or the transcript of a session id or id prefix."""
+    path = os.path.expanduser(target)
+    if os.path.isfile(path):
+        return path
+    if re.fullmatch(r"[0-9a-fA-F-]{4,36}", target):
+        root = os.path.expanduser(settings.PROJECTS_ROOT)
+        hits = sorted(glob.glob(os.path.join(glob.escape(root), "*", target.lower() + "*.jsonl")))
+        hits = [h for h in hits if h.endswith(".jsonl")]
+        if len(hits) == 1:
+            return hits[0]
+        if len(hits) > 1:
+            raise PruneError(f"{target!r} matches {len(hits)} sessions; give more of the id")
+    raise PruneError(f"no such transcript or session id: {target}")
+
+
+def cmd_export(args) -> None:
+    folders = config.load_folders()
+    if args.folders:
+        if not folders.folders:
+            print(f"no export folders yet: set {config.DIRS} in {config.env_path()}")
+            return
+        for f in folders.folders:
+            mark = "default" if f.name == folders.default else ""
+            print(f"  {f.name:<16} {mark:<8} {f.path}")
+        print(f"\n  from {config.env_path()}")
+        return
+    if not args.file:
+        sys.exit("export needs FILE (a transcript path or a session id)")
+    values = config.read_env()
+    opts = ExportOptions(
+        raw=args.raw, head=args.head or 0, tail=args.tail or 0,
+        before_compaction=args.history, summary=args.summary,
+        timezone=args.timezone or values.get(config.TIMEZONE) or "local",
+        user_name=args.user_name or values.get(config.USER_NAME) or ExportOptions.user_name,
+        assistant_name=args.assistant_name or values.get(config.ASSISTANT_NAME)
+        or ExportOptions.assistant_name,
+        title=args.title or "")
+    if args.dest and args.to:
+        sys.exit("give DEST or --to NAME, not both")
+    if args.dest:
+        dest = args.dest
+    else:
+        folder = folders.get(args.to)
+        if folder is None:
+            if args.to:
+                names = ", ".join(f.name for f in folders.folders) or "none"
+                sys.exit(f"no export folder named {args.to!r} (have: {names})")
+            sys.exit("no DEST given and no default export folder: pass DEST, or set "
+                     f"{config.DIRS} (and {config.DEFAULT}) in {config.env_path()}")
+        dest = folder.expanded + os.sep
+    path = resolve_session(args.file)
+    t = read_transcript(path, opts)
+    out = write_export(t, resolve_destination(t, dest), opts, overwrite=args.force)
+    note = f" ({t.trim_note})" if t.trim_note else ""
+    print(f"wrote {out.messages} of {out.total} messages{note} to {out.path}")
+    print(f"size {out.size / 1024:.1f} KB" + (f", {t.compactions} compaction(s) crossed"
+                                             if t.compactions else ""))
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog=PROG,
@@ -511,7 +578,34 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="Always confirm `pgrep -af claude` is empty before mutating "
                "a transcript.")
     p.add_argument("--version", action="version", version=f"cc-prune {__version__}")
+    p.add_argument("--gui", action="store_true", help="open the window instead (needs PySide6; "
+                   "fetched through uv on first use)")
     sub = p.add_subparsers(dest="cmd")
+
+    ex = sub.add_parser("export", help="export a session as a markdown transcript")
+    ex.add_argument("file", nargs="?", metavar="FILE", help="transcript path or session id (prefix)")
+    ex.add_argument("dest", nargs="?", metavar="DEST",
+                    help="output file, or a directory for an automatic name "
+                         "(default: the default export folder)")
+    ex.add_argument("--to", metavar="NAME", help="write into the named export folder")
+    ex.add_argument("--folders", action="store_true", help="list the named export folders")
+    ex.add_argument("--raw", action="store_true",
+                    help="include tool calls, tool results, thinking and images")
+    ex.add_argument("--head", type=int, metavar="N", help="only the first N messages")
+    ex.add_argument("--tail", type=int, metavar="N", help="only the last N messages")
+    ex.add_argument("--history", action="store_true",
+                    help="the whole history across compactions (default: the latest "
+                         "compaction's summary and what follows it)")
+    summ = ex.add_mutually_exclusive_group()
+    summ.add_argument("--summary", dest="summary", action="store_true", default=None,
+                      help="include compaction summaries (the default without --history)")
+    summ.add_argument("--no-summary", dest="summary", action="store_false",
+                      help="leave compaction summaries out (the default with --history)")
+    ex.add_argument("--timezone", metavar="TZ", help="local (default), utc or an offset like +2")
+    ex.add_argument("--user-name", metavar="NAME")
+    ex.add_argument("--assistant-name", metavar="NAME")
+    ex.add_argument("--title", metavar="TEXT", help="the heading (default: the session title)")
+    ex.add_argument("--force", action="store_true", help="overwrite an existing file")
 
     se = sub.add_parser("sessions", help="list and filter session transcripts")
     se.add_argument("--root", default=settings.PROJECTS_ROOT, metavar="PATH",
@@ -693,7 +787,7 @@ COMMANDS = {
     "sessions": cmd_sessions, "usage": cmd_usage, "inspect": cmd_inspect,
     "clear": cmd_clear, "reset-usage": cmd_reset_usage, "snapshots": cmd_snapshots,
     "restore": cmd_restore, "audit": cmd_audit, "strip-commands": cmd_strip_commands,
-    "cut": cmd_cut, "clearcut": cmd_clearcut, "density": cmd_density,
+    "cut": cmd_cut, "clearcut": cmd_clearcut, "density": cmd_density, "export": cmd_export,
 }
 
 
@@ -706,6 +800,11 @@ def main(argv: list[str] | None = None) -> None:
 
     p = build_parser()
     args = p.parse_args(argv)
+    if args.gui:
+        if args.cmd:
+            sys.exit("--gui takes no command")
+        start_gui()
+        return
     if args.cmd is None:
         print(f"cc-prune {__version__}: surgical context recovery for "
               f"Claude Code sessions\n\n"
@@ -714,7 +813,9 @@ def main(argv: list[str] | None = None) -> None:
               f"  {PROG + ' sessions --paths --limit 1':<42}print the newest transcript path\n"
               f"  {PROG + ' inspect FILE':<42}see where the bytes are\n"
               f"  {PROG + ' clear FILE --results 500':<42}clear tool output (snapshots first)\n"
-              f"  {PROG + ' restore FILE 0':<42}roll back to snapshot 0\n\n"
+              f"  {PROG + ' restore FILE 0':<42}roll back to snapshot 0\n"
+              f"  {PROG + ' export FILE':<42}write a markdown transcript\n"
+              f"  {PROG + ' --gui':<42}open the window\n\n"
               f"Run `{PROG} COMMAND -h` for the options of a command.\n")
         p.print_help()
         return
@@ -722,3 +823,24 @@ def main(argv: list[str] | None = None) -> None:
         COMMANDS[args.cmd](args)
     except PruneError as exc:
         sys.exit(str(exc))
+
+
+GUI_REQUIREMENT = "pyside6>=6.7"
+
+
+def start_gui() -> None:
+    """Open the window. Without PySide6, run again through uv with it."""
+    try:
+        import PySide6  # noqa: F401
+    except ImportError:
+        uv = shutil.which("uv")
+        if not uv or os.environ.get("CC_PRUNE_GUI_REEXEC"):
+            sys.exit("the window needs PySide6: install uv (https://docs.astral.sh/uv/), "
+                     "or run `uv sync --extra gui`")
+        src = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        env = dict(os.environ, CC_PRUNE_GUI_REEXEC="1",
+                   PYTHONPATH=os.pathsep.join(filter(None, [src, os.environ.get("PYTHONPATH")])))
+        os.execve(uv, [uv, "run", "--no-project", "--quiet", "--with", GUI_REQUIREMENT,
+                       "python", "-m", "ccprune", "--gui"], env)
+    from .gui import main as gui_main
+    gui_main([sys.argv[0]])

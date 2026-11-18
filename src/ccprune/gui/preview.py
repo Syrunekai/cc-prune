@@ -2,9 +2,11 @@
 from __future__ import annotations
 
 import html
+import os
 import time
 
-from PySide6.QtWidgets import QLabel, QPlainTextEdit, QTextBrowser, QVBoxLayout, QWidget
+from PySide6.QtWidgets import (QLabel, QPlainTextEdit, QStackedWidget, QTextBrowser,
+                               QVBoxLayout, QWidget)
 
 from ..calibration import Outcome
 from ..prune import Plan
@@ -36,6 +38,14 @@ class PreviewPanel(QWidget):
         self.confidence.setWordWrap(True)
         self.details = QTextBrowser()
         self.details.setOpenLinks(False)
+        self.markdown = QPlainTextEdit()
+        self.markdown.setReadOnly(True)
+        mono = self.markdown.font()
+        mono.setFamily("monospace")
+        self.markdown.setFont(mono)
+        self.pages = QStackedWidget()
+        self.pages.addWidget(self.details)
+        self.pages.addWidget(self.markdown)
         self.report_title = QLabel("Report")
         self.report_title.setObjectName("muted")
         self.report = QPlainTextEdit()
@@ -49,12 +59,14 @@ class PreviewPanel(QWidget):
         lay.setContentsMargins(8, 0, 8, 0)
         for w in (self.title, self.sub, self.big, self.confidence):
             lay.addWidget(w)
-        lay.addWidget(self.details, 1)
+        lay.addWidget(self.pages, 1)
         lay.addWidget(self.report_title)
         lay.addWidget(self.report)
         self.show_message("Select a session on the left.")
 
     def show_message(self, text: str, row: SessionRow | None = None) -> None:
+        self.pages.setCurrentWidget(self.details)
+        self.big.setStyleSheet("")
         self._header(row)
         self.big.setText("")
         self.confidence.setText("")
@@ -73,6 +85,7 @@ class PreviewPanel(QWidget):
         self.sub.setText("  ·  ".join(b for b in bits if b))
 
     def show_plan(self, row: SessionRow, plan: Plan, history: list[Outcome]) -> None:
+        self.pages.setCurrentWidget(self.details)
         self._header(row)
         if plan.estimate:
             self.big.setText(f"~{fmt.tokens(plan.estimate)} tokens")
@@ -132,6 +145,32 @@ class PreviewPanel(QWidget):
                 f'<span style="color:{theme.GOOD if abs(o.error) < 0.1 else theme.WARN}">'
                 f"({o.error:+.0%})</span>" for o in history[-4:])))
         self.details.setHtml(f"<table cellspacing='4'>{''.join(rows)}</table>")
+
+    def show_export(self, row: SessionRow, shown: int, total: int, note: str, compactions: int,
+                    target: str, exists: bool, text: str, live: bool,
+                    history: bool = False, summary: bool = False) -> None:
+        self._header(row)
+        self.pages.setCurrentWidget(self.markdown)
+        self.big.setText(f"{shown:,} messages" + (f" of {total:,}" if shown != total else ""))
+        self.big.setStyleSheet("")
+        bits = []
+        if target:
+            home = os.path.expanduser("~")
+            where = target.replace(home, "~", 1)
+            bits.append(f"→ {esc(where)}" + (f' <span style="color:{theme.WARN}">(exists, '
+                                              f'will ask before overwriting)</span>' if exists else ""))
+        else:
+            bits.append(f'<span style="color:{theme.WARN}">Choose a folder in the Export tab.</span>')
+        if compactions:
+            bits.append(f"{compactions} compaction(s) in this session: "
+                        + (("the whole history, compactions marked"
+                            + (", with their summaries" if summary else "")) if history
+                           else "starting at the latest" + (", with its summary" if summary else "")))
+        if live:
+            bits.append(f'<span style="color:{theme.MUTED}">The session is live: the export holds '
+                        f'the file as it is now.</span>')
+        self.confidence.setText("<br>".join(bits))
+        self.markdown.setPlainText(text)
 
     def show_report(self, text: str) -> None:
         stamp = time.strftime("%H:%M:%S")

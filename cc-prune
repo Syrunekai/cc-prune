@@ -3,7 +3,7 @@
 # requires-python = ">=3.9"
 # dependencies = []
 # ///
-"""The cc-prune command line. Run it directly, no install needed: ./cc_prune.py COMMAND ..."""
+"""cc-prune, run from a checkout: the command line, or the window with --gui."""
 import os
 import sys
 
@@ -11,5 +11,4 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "sr
 
 from ccprune.cli import main  # noqa: E402
 
-if __name__ == "__main__":
-    main()
+main()

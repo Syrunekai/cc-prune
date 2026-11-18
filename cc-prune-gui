@@ -1,15 +1,3 @@
-#!/usr/bin/env -S uv run --script
-# /// script
-# requires-python = ">=3.10"
-# dependencies = ["pyside6>=6.7"]
-# ///
-"""The cc-prune window. Run it directly (uv installs PySide6 on first use):
-./cc-prune-gui"""
-import os
-import sys
-
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.realpath(__file__)), "src"))
-
-from ccprune.gui import main  # noqa: E402
-
-main()
+#!/bin/sh
+# Opens the cc-prune window: the same as `cc-prune --gui`.
+exec "$(dirname "$(readlink -f "$0")")/cc-prune" --gui "$@"

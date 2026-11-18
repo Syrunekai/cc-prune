@@ -6,7 +6,7 @@ recorded `usage` on the last requests still holds the pre-prune size (for exampl
 and `clear` does not change the conversation's recorded usage by itself. Fix:
 
 ```bash
-python3 cc_prune.py reset-usage "$F" --tokens 335000    # a figure below your window
+./cc-prune reset-usage "$F" --tokens 335000    # a figure below your window
 ```
 
 Pick a number comfortably under your context window. The next real reply corrects it. A
@@ -40,8 +40,8 @@ second.
 Two experimental flags, both opt-in:
 
 ```bash
-python3 cc_prune.py clear "$F" --transformations         # delete the saved reports (shrinks history once)
-python3 cc_prune.py clear "$F" --drop-failing-thinking   # delete the blocks the API reported dropping
+./cc-prune clear "$F" --transformations         # delete the saved reports (shrinks history once)
+./cc-prune clear "$F" --drop-failing-thinking   # delete the blocks the API reported dropping
 ```
 
 `--transformations` alone does not stop the growth: the field is regenerated every turn
@@ -74,10 +74,10 @@ safeguards (preview unless `--yes`, live-session guard, exact validation, record
 empty content) and can be combined with a prune in one pass:
 
 ```bash
-python3 cc_prune.py clear "$F" --results 1 --inputs 1 --images --drop-all-thinking --yes
+./cc-prune clear "$F" --results 1 --inputs 1 --images --drop-all-thinking --yes
 # only if earlier resumes already saved reports: wait out the live-edit window
 # (30 s by default), then remove them:
-python3 cc_prune.py clear "$F" --transformations --keep-tail 0
+./cc-prune clear "$F" --transformations --keep-tail 0
 ```
 
 What it costs: the reasoning is gone from the transcript, although with the default
