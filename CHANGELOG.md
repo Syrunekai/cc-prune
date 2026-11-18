@@ -1,6 +1,28 @@
 # Changelog
 
-## 0.4.0 (2026-11-10)
+## 0.4.0 (2026-11-18)
+
+### Added
+
+- `cc_prune.py` and the new `cc-prune-gui` are executable and start with a `uv` shebang
+  (`#!/usr/bin/env -S uv run --script`) with their dependencies declared in the script header, so
+  `./cc-prune-gui` runs from a checkout with no install and no activated environment.
+- **A window** (`cc-prune-gui`, `python3 -m ccprune.gui`; Linux, needs the `gui` extra, PySide6). A
+  sessions list with favorites, an always-visible settings panel with stepped sliders and the exact
+  command for the same edit, a live preview, and a bottom drawer (hidden by default) with the
+  by-turn range slider and the snapshots. The turn range is only used when "By turn range" is
+  selected. Apply checks the live-session guard and waits out the recent-edit check on its own.
+- `clearcut` takes `--from A --to B`, as `cut` does.
+- Snapshots carry a label and can be pinned, deleted and capped: `snapshots FILE --pin N`,
+  `--unpin N`, `--delete N`, and `MAX_SNAPSHOTS` in the settings. Snapshot 0 counts as pinned.
+- Favorite sessions, kept by id in `~/.config/ccprune/favorites.json`.
+- The context each edit estimated is logged in `~/.local/share/ccprune/estimates.jsonl` and matched
+  later with the real count the API recorded for the first request after it.
+- An estimate says whether it is anchored on real counts or chained on an earlier estimate.
+- A plan can be made from an already-read transcript (`load_transcript`, `plan_prune(loaded=...)`),
+  and applying it is refused if the file changed after it was read.
+- Tests (`uv run pytest`) on a synthetic transcript: clear counts, plan writes nothing,
+  clearcut equals a cut then a clear, one snapshot, validation failure, restore, the guard.
 
 ### Changed
 
@@ -23,10 +45,15 @@
   `src/ccprune/settings.py`.
 - Rollback lines name the command as it was run (`cc_prune.py` or `cc-prune`).
 
-### Added
+### Fixed
 
-- Tests (`uv run pytest`) on a synthetic transcript: clear counts, plan writes nothing,
-  clearcut equals a cut then a clear, one snapshot, validation failure, restore, the guard.
+- **The estimator over-estimated after earlier cuts.** The first request in the file was treated as
+  an untouched anchor even when counts had dropped since, which spread a stale count over the few
+  records left. One real session came out at 520k against a real 210k. That anchor is now skipped
+  after any drop, and a segment's rescaling is capped at 6x. On 36 real before/after pairs the
+  error is now between -7% and +4% (median 2%); before, the worst case was +157%.
+- A clear that matches nothing no longer rewrites the file or takes a snapshot.
+- `restore` labels the snapshot it saves.
 
 ### Removed
 

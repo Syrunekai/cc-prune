@@ -18,6 +18,10 @@ OVERHEAD_TOKENS = 15000
 # fraction the estimate is lowered by so it lands just under the real count
 ESTIMATE_MARGIN = 0.025
 MIN_ESTIMATE = 1000
+# a segment's measured tokens may exceed its content weight by at most this
+# factor when rescaling the records inside it; a larger ratio means content
+# the weights cannot see, and spreading it over a few records over-corrects
+MAX_SEGMENT_SCALE = 6.0
 
 
 def iso_time(stamp) -> float:
@@ -75,9 +79,10 @@ def estimate_context(old: list[dict], new: list[dict], since: float,
         key = (old[last].get("message") or {}).get("id") or old[last].get("uuid")
         real = [points[key][:2]]
     # the first request's count covers the opening prompt and attachments,
-    # which no edit touches
+    # which no edit touches, unless a drop shows records were removed after
+    # it was made
     first = min(points.values())
-    if first[0] < real[0][0] and first[1] < real[0][1]:
+    if not drops and first[0] < real[0][0] and first[1] < real[0][1]:
         real.insert(0, first[:2])
     bounds = [i for i, _ in real]
     totals = [real[0][1]] + [real[k][1] - real[k - 1][1] for k in range(1, len(real))]
@@ -108,6 +113,8 @@ def estimate_context(old: list[dict], new: list[dict], since: float,
     for i in conv:
         seg_w[seg(i)] += w_old[i]
     scale = [t / w if w > 0 and t > 0 else 1.0 for t, w in zip(totals, seg_w)]
+    if MAX_SEGMENT_SCALE:
+        scale = [min(x, MAX_SEGMENT_SCALE) for x in scale]
 
     # the new conversation, up to the same request; thinking after the first
     # changed record no longer matches its signature
@@ -145,13 +152,16 @@ def estimate_context(old: list[dict], new: list[dict], since: float,
     return max(int(est * (1 - margin)), MIN_ESTIMATE), fresh
 
 
-def estimate_after(path: str, before: list[dict], new: list[dict], since: float) -> int | None:
+def estimate_after(path: str, before: list[dict], new: list[dict],
+                   since: float) -> tuple[int | None, bool]:
     """estimate_context from the newest version of the file whose counts are
     real: the file before this edit, or, when this edit follows another one
-    with no request in between, the snapshot taken before that one."""
+    with no request in between, the snapshot taken before that one. The flag
+    says whether the estimate rests on real counts (anchored) or only on an
+    earlier estimate (chained)."""
     est, fresh = estimate_context(before, new, since)
     if fresh or est is None:
-        return est
+        return est, fresh
     snaps = snapshot_paths(path)
     times = [os.stat(s).st_ctime for s in snaps]
     tried = 0
@@ -160,8 +170,8 @@ def estimate_after(path: str, before: list[dict], new: list[dict], since: float)
             continue
         older, ok = estimate_context(load(snaps[k]), new, times[k - 1] if k else 0.0)
         if ok:
-            return older
+            return older, True
         tried += 1
         if tried == 5:
             break
-    return est
+    return est, False

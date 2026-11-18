@@ -17,7 +17,7 @@ from .guard import check_live
 from .maintenance import apply_strip, plan_strip, reset_usage_file
 from .prune import Applied, Plan, apply_plan, plan_prune
 from .sessions import find_sessions, to_local
-from .snapshots import list_snapshots, restore_snapshot
+from .snapshots import delete_snapshot, list_snapshots, restore_snapshot, set_pinned
 from .transcript import first_text, load
 from .turns import Turns
 from .usage import usage_rows
@@ -40,13 +40,21 @@ def mb(n: float) -> str:
 # --------------------------------------------------------------------------
 
 def cmd_snapshots(args) -> None:
+    if args.pin is not None:
+        set_pinned(args.path, args.pin, True)
+    if args.unpin is not None:
+        set_pinned(args.path, args.unpin, False)
+    if args.delete is not None:
+        freed = delete_snapshot(args.path, args.delete)
+        print(f"deleted snap{args.delete} ({mb(freed)})")
     snaps = list_snapshots(args.path)
     if not snaps:
-        print("no snapshots yet -- the first `clear` creates snap0 "
+        print("no snapshots yet -- the first edit creates snap0 "
               "from the pristine file")
         return
-    for p, size in snaps:
-        print(f"  {os.path.basename(p):<52} {mb(size)}")
+    for s in snaps:
+        pin = "pinned" if s.pinned else ""
+        print(f"  {os.path.basename(s.path):<52} {mb(s.size):>10}  {pin:<7} {s.label}")
     print(f"\n  current  {os.path.basename(args.path):<52} {mb(os.path.getsize(args.path))}")
 
 
@@ -296,8 +304,16 @@ def print_context(plan: Plan) -> None:
               f"(estimate, kept {ESTIMATE_MARGIN:.1%} under)")
 
 
+def print_dropped(applied: Applied) -> None:
+    if applied.dropped:
+        names = ", ".join(f"snap{d.n}" for d in applied.dropped)
+        print(f"deleted {len(applied.dropped)} old snapshot(s) over the limit: {names} "
+              f"({mb(sum(d.size for d in applied.dropped))})")
+
+
 def print_applied(plan: Plan, applied: Applied) -> None:
     print(f"snapshot -> {os.path.basename(applied.snapshot_path)}")
+    print_dropped(applied)
     if applied.reset:
         print(f"usage reset: last request {applied.reset.last:,} -> "
               f"~{applied.reset.estimate:,} tokens on {applied.reset.records} records "
@@ -324,6 +340,7 @@ def cmd_cut(args) -> None:
     print()
     cut = plan.cut
     print(f"snapshot -> {os.path.basename(applied.snapshot_path)}")
+    print_dropped(applied)
     print(f"cut turns {cut.a + 1}-{cut.b} ({cut.b - cut.a} turns), "
           + ("purge (deleted from the file)" if cut.purge
              else "branch (stays in the file, unreachable)"))
@@ -369,8 +386,15 @@ def cmd_clear(args) -> None:
     plan = plan_prune(args.path, clear=opts, reset_usage=not args.no_reset_usage)
     applied = apply_plan(plan, force=args.force)
 
-    print(f"snapshot -> {os.path.basename(applied.snapshot_path)}")
     out = plan.clear
+    if applied.noop:
+        print(f"protected the last {out.protected} of {out.total} records "
+              f"(--keep-tail {args.keep_tail})")
+        print_clear(plan)
+        print("\nnothing changed: the file was not rewritten and no snapshot was taken")
+        return
+    print(f"snapshot -> {os.path.basename(applied.snapshot_path)}")
+    print_dropped(applied)
     print(f"protected the last {out.protected} of {out.total} records "
           f"(--keep-tail {args.keep_tail})")
     print_clear(plan)
@@ -391,8 +415,8 @@ def cmd_clearcut(args) -> None:
         drop_failing_thinking=args.drop_failing_thinking,
         drop_all_thinking=args.drop_all_thinking,
         keep_tail=DEFAULT_KEEP_TAIL if args.keep_tail is None else args.keep_tail)
-    cut = CutOptions(drop=args.drop, keep_head=args.keep_head, purge=not args.branch,
-                     note=not args.no_note)
+    cut = CutOptions(drop=args.drop, keep_head=args.keep_head, from_turn=args.from_turn,
+                     to_turn=args.to_turn, purge=not args.branch, note=not args.no_note)
     plan = plan_prune(args.path, cut=cut, clear=clear, reset_usage=not args.no_reset_usage)
 
     print_cut(plan)
@@ -565,8 +589,12 @@ def build_parser() -> argparse.ArgumentParser:
     ru.add_argument("--force", action="store_true",
                     help="edit a transcript even if a running session has it open")
 
-    s = sub.add_parser("snapshots", help="list snapshots")
+    s = sub.add_parser("snapshots", help="list snapshots; pin, unpin or delete one")
     s.add_argument("path")
+    s.add_argument("--pin", type=int, metavar="N",
+                   help="keep snapshot N even when the snapshot limit is reached")
+    s.add_argument("--unpin", type=int, metavar="N")
+    s.add_argument("--delete", type=int, metavar="N")
 
     r = sub.add_parser("restore", help="restore a snapshot")
     r.add_argument("path")
@@ -616,10 +644,15 @@ def build_parser() -> argparse.ArgumentParser:
     cc = sub.add_parser("clearcut", help="cut, then clear, in one pass with one "
                                          "snapshot (previews unless --yes)")
     cc.add_argument("path")
-    cc.add_argument("--drop", type=float, required=True, metavar="F",
-                    help="cut this fraction of the conversation after the head")
+    cc.add_argument("--drop", type=float, default=0, metavar="F",
+                    help="cut this fraction of the conversation after the head "
+                         "(or give --from and --to)")
     cc.add_argument("--keep-head", type=int, default=1, metavar="N",
                     help="turns at the start that always stay (default 1)")
+    cc.add_argument("--from", dest="from_turn", type=int, default=0, metavar="A",
+                    help="first turn to cut (turn numbers from `cut --list`)")
+    cc.add_argument("--to", dest="to_turn", type=int, default=0, metavar="B",
+                    help="last turn to cut, inclusive")
     cc.add_argument("--keep-tail", type=float, default=None, metavar="F",
                     help="fraction of most recent records the clear leaves "
                          f"untouched (default: clear's own, {DEFAULT_KEEP_TAIL})")

@@ -56,8 +56,16 @@ cd cc-prune
 python3 cc_prune.py --version
 ```
 
-Python 3.9+, no dependencies. `cc_prune.py` runs straight from the checkout; to work on the
-code or get a `cc-prune` command instead, use [uv](https://docs.astral.sh/uv/):
+Python 3.9+, no dependencies. Both launchers are executable and start with a
+[uv](https://docs.astral.sh/uv/) shebang, so they run straight from the checkout with no install
+and no virtual environment to activate (`uv` must be on your `PATH`):
+
+```bash
+./cc_prune.py sessions            # the command line
+./cc-prune-gui                    # the window; uv fetches PySide6 on first use
+```
+
+`python3 cc_prune.py ...` works too. To work on the code or get `cc-prune` commands instead:
 
 ```bash
 uv run cc-prune --version     # runs from the project environment
@@ -215,6 +223,21 @@ python3 cc_prune.py snapshots "$F"
 python3 cc_prune.py restore  "$F" 0     # 0 = pristine
 ```
 
+Every edit takes one snapshot first and labels it (`cut turns 2-30`, `clear`, ...). An edit that
+changes nothing, such as a clear that matches nothing, writes nothing and takes no snapshot.
+`restore` saves the current file as a snapshot before it overwrites it.
+
+Snapshot 0, the pristine file, is pinned. Pin any other one to keep it, or delete one:
+
+```bash
+python3 cc_prune.py snapshots "$F" --pin 3
+python3 cc_prune.py snapshots "$F" --unpin 3
+python3 cc_prune.py snapshots "$F" --delete 3
+```
+
+Set `MAX_SNAPSHOTS` in `src/ccprune/settings.py` (0 keeps all, the default) to cap them. After an
+edit succeeds, the oldest unpinned snapshots beyond the cap are deleted. Numbers are never reused.
+
 ---
 
 ## Troubleshooting
@@ -293,6 +316,40 @@ python3 cc_prune.py density --before 867650 --after 570000 --mb 0.45
 
 ---
 
+## The window
+
+A desktop window over the same engine (Linux, needs [PySide6](https://doc.qt.io/qtforpython-6/)):
+
+```bash
+./cc-prune-gui                         # uv fetches PySide6 on first use
+uv run --extra gui cc-prune-gui        # the same, from the project environment
+```
+
+It can be started by double-clicking `cc-prune-gui` in a file manager that runs executable
+scripts (in Thunar, set Edit > Preferences > Behavior to run executable text files; others
+may ask "Run" or "Open").
+
+- **Sessions** on the left: filter by title or project, click the star to favorite one
+  (favorites sort first and have a "★ only" filter). A session registered to a running Claude
+  Code process is shown in red.
+- **Settings** on the right, always visible. Whatever is set there is what the next edit uses,
+  and it is saved between runs. Drop and keep-tail are sliders in steps of 0.05, each with a box
+  that takes any value. The exact command that makes the same edit is shown under them.
+- **Preview** in the middle: the cut, the clear, the snapshot that will be taken and the
+  estimated context. The estimate is labeled **Anchored** (it rests on real request counts) or
+  **Chained** (it rests on an earlier estimate and can be well off). Apply is disabled while a
+  running session holds the transcript, and waits out the recent-edit check on its own.
+- **Drawer** along the bottom, hidden until you open it with the button at the bottom left
+  (Ctrl+D). Opening it changes nothing. It has the turn timeline and the snapshots.
+  The two-tip range slider there is only used when you choose **By turn range** in the settings
+  panel; the tips start at the largest cut and you pull them in.
+
+After each edit the window records the context it estimated, and the next time you open the
+session it matches that with the real count the API recorded, so the preview shows how the
+estimator did on that session.
+
+---
+
 ## Cutting turns
 
 When most of what is left is conversation, clearing buckets stops paying. `cut` removes a
@@ -345,12 +402,12 @@ usage FILE                     real API token counts
 inspect FILE                   byte accounting by bucket
 clear FILE --results N ...     clear buckets (snapshots first, resets usage)
 reset-usage FILE --tokens N    rewrite stale recorded usage so a pruned session resumes
-snapshots FILE                 list snapshots
+snapshots FILE [--pin N ...]   list snapshots, pin, unpin or delete one
 restore FILE N                 restore snapshot N
 audit FILE LINE...             is this specific result safe to clear?
 strip-commands FILE --orphans  clear /context, /cost output
 cut FILE --drop F | --from A --to B   cut a stretch of turns (previews unless --yes)
-clearcut FILE --drop F         cut and clear in one pass, one snapshot (previews unless --yes)
+clearcut FILE --drop F | --from A --to B   cut and clear in one pass, one snapshot (previews unless --yes)
 density --before --after --mb  derive chars/token from a measured cut
 ```
 

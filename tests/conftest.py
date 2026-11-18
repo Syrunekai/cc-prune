@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 def write_transcript(path, turns: int = 8, result_chars: int = 3000,
@@ -52,3 +55,16 @@ def transcript(tmp_path):
     path = tmp_path / "t.jsonl"
     write_transcript(path)
     return str(path)
+
+
+def write_session(root, name: str, project: str = "-tmp-proj", **kw) -> str:
+    """A transcript under root/project/<name>.jsonl that `sessions` can find."""
+    folder = root / project
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{name}.jsonl"
+    write_transcript(path, **kw)
+    old = __import__("time").time() - 3600
+    os.utime(path, (old, old))
+    return str(path)
+
+
