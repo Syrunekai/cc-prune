@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from PySide6.QtGui import QColor, QPalette
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QToolTip
 
 BG = "#1e2024"
 PANEL = "#26292e"
@@ -35,6 +35,12 @@ def apply_theme(app: QApplication) -> None:
                  QPalette.ColorRole.WindowText):
         pal.setColor(QPalette.ColorGroup.Disabled, role, QColor("#5d626b"))
     app.setPalette(pal)
+    tip = QPalette(pal)
+    tip.setColor(QPalette.ColorRole.ToolTipBase, QColor(PANEL))
+    tip.setColor(QPalette.ColorRole.ToolTipText, QColor(TEXT))
+    tip.setColor(QPalette.ColorRole.Window, QColor(PANEL))
+    tip.setColor(QPalette.ColorRole.WindowText, QColor(TEXT))
+    QToolTip.setPalette(tip)
     app.setStyleSheet(f"""
         QGroupBox {{ border: 1px solid #343840; border-radius: 6px; margin-top: 10px;
                      padding: 8px 6px 6px 6px; }}
@@ -55,7 +61,8 @@ def apply_theme(app: QApplication) -> None:
                                 padding: 4px 6px; }}
         QLabel#muted {{ color: {MUTED}; }}
         QLabel#big {{ font-size: 26px; font-weight: 600; }}
-        QToolTip {{ border: 1px solid #343840; padding: 4px; }}
+        QToolTip {{ color: {TEXT}; background-color: {PANEL}; border: 1px solid #4a505a;
+                    padding: 4px; }}
         QCheckBox::indicator, QGroupBox::indicator {{ width: 14px; height: 14px;
             border: 1px solid #5a606a; border-radius: 3px; background: {FIELD}; }}
         QCheckBox::indicator:checked, QGroupBox::indicator:checked {{

@@ -32,7 +32,7 @@ the snapshot until you have confirmed the session still resumes.
 """
 from __future__ import annotations
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 from .errors import PruneError
 from .prune import Plan, apply_plan, plan_prune

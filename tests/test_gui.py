@@ -480,3 +480,14 @@ def test_the_summary_choice_is_not_remembered(world, export_env, app):
     save_section("export", {"before_compaction": False, "summary": False})
     w2 = make()
     assert w2.export_panel.summary.isChecked()
+
+
+def test_tooltips_use_the_theme_colors_not_the_system_ones(app):
+    from PySide6.QtGui import QPalette
+    from PySide6.QtWidgets import QToolTip
+    from ccprune.gui import theme
+    theme.apply_theme(app)
+    pal = QToolTip.palette()
+    assert pal.color(QPalette.ColorRole.ToolTipText).name() == theme.TEXT
+    assert pal.color(QPalette.ColorRole.ToolTipBase).name() == theme.PANEL
+    assert f"QToolTip {{ color: {theme.TEXT}; background-color: {theme.PANEL};" in app.styleSheet()

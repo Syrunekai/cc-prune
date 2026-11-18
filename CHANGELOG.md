@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.1 (2026-11-18)
+
+### Fixed
+
+- Tooltips in the window were black text on dark grey on desktops whose GTK/Qt style assumes
+  light tooltips (seen on XFCE). They now take the theme's colors, through the stylesheet and
+  Qt's separate tooltip palette.
+- The README's install step cloned the original repository, which holds only its first commit;
+  it now clones this fork, and the License section credits the original author.
+
 ## 0.5.0 (2026-11-18)
 
 ### Added
