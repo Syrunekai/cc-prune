@@ -1,6 +1,6 @@
 [project]
 name = "cc-prune"
-version = "0.5.1"
+version = "0.5.2"
 description = "Surgical context recovery for Claude Code sessions."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -15,7 +15,7 @@ cc-prune-gui = "ccprune.gui:main"
 
 [project.optional-dependencies]
 gui = [
-    "pyside6>=6.7",
+    "pyside6-essentials>=6.7",
 ]
 
 [dependency-groups]

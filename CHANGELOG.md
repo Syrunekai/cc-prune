@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.5.2 (2026-11-20)
+
+### Changed
+
+- The window needs only `pyside6-essentials` (QtCore, QtGui, QtWidgets), not the full
+  `pyside6` bundle, which adds the Addons, WebEngine and PDF packages the window never uses.
+  `--gui` and the `gui` extra now ask for Essentials alone: about 237 MB where the bundle was
+  about 660 MB, which matters most on the first `--gui` run on a new machine.
+
 ## 0.5.1 (2026-11-18)
 
 ### Fixed

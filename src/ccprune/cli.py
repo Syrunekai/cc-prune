@@ -825,7 +825,7 @@ def main(argv: list[str] | None = None) -> None:
         sys.exit(str(exc))
 
 
-GUI_REQUIREMENT = "pyside6>=6.7"
+GUI_REQUIREMENT = "pyside6-essentials>=6.7"
 
 
 def start_gui() -> None:

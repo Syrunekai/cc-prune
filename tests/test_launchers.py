@@ -79,10 +79,16 @@ def test_without_pyside6_the_gui_runs_again_through_uv(monkeypatch):
         cli.start_gui()
     exe, argv, env = calls[0]
     assert exe == "/usr/bin/uv" and argv[1:3] == ["run", "--no-project"]
-    assert "--with" in argv and argv[argv.index("--with") + 1].startswith("pyside6")
+    assert "--with" in argv and argv[argv.index("--with") + 1].startswith("pyside6-essentials")
     assert argv[-3:] == ["-m", "ccprune", "--gui"] and env["CC_PRUNE_GUI_REEXEC"] == "1"
     assert os.path.join(ROOT, "src") in env["PYTHONPATH"].split(os.pathsep)
 
     monkeypatch.setenv("CC_PRUNE_GUI_REEXEC", "1")
     with pytest.raises(SystemExit, match="needs PySide6"):
         cli.start_gui()
+
+
+def test_the_gui_extra_asks_for_pyside6_essentials_only():
+    text = open(os.path.join(ROOT, "pyproject.toml"), encoding="utf-8").read()
+    assert '"pyside6-essentials>=' in text and '"pyside6>=' not in text
+    assert cli.GUI_REQUIREMENT.startswith("pyside6-essentials")
