@@ -7,8 +7,8 @@ import time
 
 from PySide6.QtCore import QTimer, Qt, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QLabel, QMainWindow, QMessageBox, QPushButton, QSplitter,
-                               QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QLabel, QMainWindow, QMenu, QMessageBox, QPushButton,
+                               QSplitter, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import settings as engine_settings
 from ..calibration import reconcile
@@ -17,16 +17,19 @@ from ..favorites import load_favorites, set_favorite
 from ..guard import live_reasons
 from ..prune import apply_plan, load_transcript, plan_prune
 from ..sessions import find_sessions, scan_session
-from ..snapshots import delete_snapshot, list_snapshots, restore_snapshot, set_pinned
+from ..manage import delete_session, rename_session, session_files
+from ..snapshots import delete_all_snapshots, list_snapshots
 from ..transcript import first_text
 from ..turns import Turns
 from . import fmt
+from .actions import BackupsDialog, SnapshotController, _ask, ask_title, confirm_delete
 from .drawer import Drawer, TurnInfo
 from .export_panel import ExportPanel, ExportSettings
 from .preview import PreviewPanel
 from .sessions import SessionRow, SessionsPanel, to_rows
 from .settings_panel import SettingsPanel
 from .state import load_section, load_settings, save_section, save_settings
+from .widgets import mark_danger
 from .workers import run_async
 
 PREVIEW_DELAY_MS = 250
@@ -57,6 +60,7 @@ class MainWindow(QMainWindow):
         self.armed = False
         self._load_gen = self._plan_gen = 0
         self._fresh_selection = False
+        self.plan_error = ""
 
         self.sessions = SessionsPanel()
         self.preview = PreviewPanel()
@@ -121,9 +125,11 @@ class MainWindow(QMainWindow):
         self.export_panel.open_folder.clicked.connect(self.open_export_folder)
         self.drawer_button.toggled.connect(self.toggle_drawer)
         self.drawer.timeline.rangeChosen.connect(self.panel.set_turn_range)
-        self.drawer.snapshots.restoreRequested.connect(self.on_restore)
-        self.drawer.snapshots.deleteRequested.connect(self.on_delete)
-        self.drawer.snapshots.pinToggled.connect(self.on_pin)
+        self.snapshots = SnapshotController(self.drawer.snapshots, self,
+                                            lambda: self.row.path if self.row else None,
+                                            self.preview.show_report)
+        self.snapshots.changed.connect(lambda: self.row and self.after_change(self.row))
+        self.sessions.menuRequested.connect(self.session_menu)
 
         self.drawer.timeline.set_manual(self.panel.settings().method == "turns")
         self.refresh_sessions()
@@ -230,6 +236,7 @@ class MainWindow(QMainWindow):
 
     def schedule_preview(self) -> None:
         self.plan = None
+        self.plan_error = ""
         self.armed = False
         self.update_command()
         if self.loaded is None:
@@ -253,6 +260,7 @@ class MainWindow(QMainWindow):
         cut = s.cut_options(len(self.turns)) if s.cut_on else None
         clear = s.clear_options()
         if cut is None and clear is None:
+            self.plan_error = "nothing is selected: turn on the cut or pick something to clear"
             if not self.exporting_mode():
                 self.preview.show_message("Nothing is selected: turn on the cut or pick something "
                                           "to clear.", row)
@@ -275,9 +283,9 @@ class MainWindow(QMainWindow):
             if gen != self._plan_gen:
                 return
             self.plan = None
+            self.plan_error = msg.strip().splitlines()[0] if msg.strip() else "unknown error"
             if not self.exporting_mode():
-                self.preview.show_message(msg.splitlines()[0] if msg.startswith(
-                    ("pick", "--", "need", "no clean")) else msg, row)
+                self.preview.show_message("This edit can't be made: " + msg.strip(), row)
             self.update_apply()
 
         run_async(lambda: plan_prune(row.path, cut=cut, clear=clear, reset_usage=s.reset_usage,
@@ -310,7 +318,8 @@ class MainWindow(QMainWindow):
         if updating or self.loaded is None:
             return p.set_apply(False, "Apply", "Working out the edit...")
         if self.plan is None:
-            return p.set_apply(False, "Apply", "Fix the settings above.")
+            reason = self.plan_error or "the edit could not be worked out"
+            return p.set_apply(False, "Apply", "Can't apply: " + reason[0].lower() + reason[1:])
         if self.plan.is_noop:
             return p.set_apply(False, "Apply", "Nothing would change.")
         running, wait = self.guard()
@@ -411,42 +420,110 @@ class MainWindow(QMainWindow):
 
     # ---- snapshots
 
-    def on_restore(self, n: int) -> None:
-        row = self.row
-        if row is None:
+    # ---- the session menu
+
+    def session_menu(self, row: SessionRow, pos) -> None:
+        menu = QMenu(self)
+        menu.addAction("Rename…", lambda: self.rename(row))
+        menu.addSeparator()
+        menu.addAction("Manage backups…", lambda: self.manage_backups(row))
+        clear = menu.addAction("Delete all backups…", lambda: self.delete_backups(row))
+        clear.setEnabled(bool(list_snapshots(row.path)))
+        menu.addSeparator()
+        menu.addAction("Delete session…", lambda: self.delete(row))
+        mark_danger(menu, "Delete session…")
+        self.show_menu(menu, pos)
+
+    def show_menu(self, menu: QMenu, pos) -> None:
+        menu.exec(pos)
+
+    def rename(self, row: SessionRow) -> None:
+        reasons = live_reasons(row.path)
+        if reasons:
+            QMessageBox.warning(self, "Rename session",
+                                f"{row.title}\nSession {row.session_id}\n\nThis session can't be "
+                                f"renamed now: " + "; ".join(reasons) + ".\n\nA running Claude Code "
+                                f"writes its own title back after every reply. Use /rename in that "
+                                f"session, or close it first.")
             return
-        ask = QMessageBox.question(
-            self, "Restore snapshot?",
-            f"Restore snap{n} over the current transcript?\nThe current file is saved as a new "
-            f"snapshot first, so nothing is lost.")
-        if ask != QMessageBox.StandardButton.Yes:
+        title = ask_title(self, row)
+        if title is None:
+            return
+        try:
+            now = rename_session(row.path, title)
+        except Exception as exc:
+            QMessageBox.warning(self, "Rename session", f"Could not rename the session: {exc}")
+            return
+        self.preview.show_report(f"renamed {row.session_id[:8]} to {now!r}")
+        self.refresh_row(row)
+
+    def delete(self, row: SessionRow) -> None:
+        reasons = live_reasons(row.path)
+        if reasons:
+            QMessageBox.warning(self, "Delete session",
+                                f"{row.title}\nSession {row.session_id}\n\nThis session can't "
+                                f"be deleted now: " + "; ".join(reasons) + ".")
+            return
+        try:
+            files = session_files(row.path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Delete session", str(exc))
+            return
+        if not confirm_delete(self, row, files):
             return
 
-        def done(r):
-            self.preview.show_report(f"restored snap{n}; the file as it was before is saved as "
-                                     f"{os.path.basename(r.saved) if r.saved else 'nothing'}")
-            self.after_change(row)
+        def done(d):
+            self.preview.show_report(f"deleted session {d.session_id} ({row.title}): "
+                                     f"{len(d.removed)} item(s), {fmt.size(d.size)}")
+            self.favorites.discard(d.session_id)
+            if self.row is not None and self.row.path == row.path:
+                self._load_gen += 1
+                self.row, self.loaded, self.plan = None, None, None
+                self.preview.show_message("The session was deleted. Select another one.")
+                self.drawer.snapshots.set_snapshots([])
+                self.update_apply()
+            self.sessions.remove_path(row.path)
 
-        run_async(lambda: restore_snapshot(row.path, n),
-                  done, lambda m: self.preview.show_report("NOT RESTORED: " + m.strip()))
+        run_async(lambda: delete_session(row.path), done,
+                  lambda m: self.preview.show_report("NOT DELETED: " + m.strip()))
 
-    def on_delete(self, n: int) -> None:
-        row = self.row
-        if row is None:
-            return
-        ask = QMessageBox.question(self, "Delete snapshot?",
-                                   f"Delete snap{n}? It cannot be recovered.")
-        if ask != QMessageBox.StandardButton.Yes:
-            return
-        freed = delete_snapshot(row.path, n)
-        self.preview.show_report(f"deleted snap{n} ({fmt.size(freed)})")
-        self.after_change(row)
+    def manage_backups(self, row: SessionRow) -> None:
+        dialog = BackupsDialog(self, row, self.preview.show_report)
+        dialog.exec()
+        if dialog.changed:
+            self.after_change(row) if self.row and self.row.path == row.path else self.refresh_row(row)
 
-    def on_pin(self, n: int, pinned: bool) -> None:
-        if self.row is None:
+    def delete_backups(self, row: SessionRow) -> None:
+        snaps = list_snapshots(row.path)
+        if not snaps:
             return
-        set_pinned(self.row.path, n, pinned)
-        self.drawer.snapshots.set_snapshots(list_snapshots(self.row.path))
+        if not _ask(self, "Delete all backups?",
+                    f"Delete all {len(snaps)} snapshot(s) of <b>{row.title}</b>, "
+                    f"{fmt.size(sum(s.size for s in snaps))}?",
+                    "This includes snap0, the transcript as it was before cc-prune first changed "
+                    "it. They cannot be recovered; the transcript itself is not touched.",
+                    action="Delete all"):
+            return
+        freed = delete_all_snapshots(row.path)
+        self.preview.show_report(f"deleted all {len(snaps)} snapshot(s) of {row.session_id[:8]} "
+                                 f"({fmt.size(freed)})")
+        self.after_change(row) if self.row and self.row.path == row.path else self.refresh_row(row)
+
+    def refresh_row(self, row: SessionRow) -> None:
+        """Read the session's list entry again: title, size, snapshots."""
+        def work():
+            found = scan_session(row.path, False, False)
+            return to_rows([found], self.favorites)[0] if found else None
+
+        def done(new):
+            if new is None:
+                return
+            self.sessions.update_row(new)
+            if self.row is not None and self.row.path == new.path:
+                self.row = new
+                self.preview._header(new)
+
+        run_async(work, done)
 
     # ---- export
 

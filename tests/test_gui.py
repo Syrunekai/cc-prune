@@ -25,6 +25,22 @@ A = "00000000-0000-4000-8000-00000000000a"
 B = "00000000-0000-4000-8000-00000000000b"
 
 
+@pytest.fixture(autouse=True)
+def no_unexpected_dialogs(monkeypatch):
+    """A modal dialog a test did not stub fails the test instead of waiting forever."""
+    from PySide6.QtWidgets import QDialog, QInputDialog
+
+    def refuse(*a, **k):
+        raise AssertionError(f"unexpected modal dialog: {a[1:3] if len(a) > 2 else a}")
+    for name in ("warning", "question", "information", "critical"):
+        monkeypatch.setattr(QMessageBox, name, staticmethod(refuse))
+    monkeypatch.setattr(QMessageBox, "exec", refuse)
+    monkeypatch.setattr(QDialog, "exec", refuse)
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(refuse))
+    from ccprune.gui.window import MainWindow
+    monkeypatch.setattr(MainWindow, "show_menu", lambda self, menu, pos: refuse(self, "menu"))
+
+
 @pytest.fixture(scope="session")
 def app():
     return QApplication.instance() or QApplication([])
@@ -491,3 +507,163 @@ def test_tooltips_use_the_theme_colors_not_the_system_ones(app):
     assert pal.color(QPalette.ColorRole.ToolTipText).name() == theme.TEXT
     assert pal.color(QPalette.ColorRole.ToolTipBase).name() == theme.PANEL
     assert f"QToolTip {{ color: {theme.TEXT}; background-color: {theme.PANEL};" in app.styleSheet()
+
+
+# ---- the session menu: rename, delete, backups
+
+def test_right_click_offers_rename_delete_and_backups(world, app, monkeypatch):
+    make, paths = world
+    w = make()
+    seen = []
+    menus = []
+    monkeypatch.setattr(w, "show_menu", lambda menu, pos: (menus.append(menu), seen.append(
+        [(x.text(), x.isEnabled()) for x in menu.actions() if not x.isSeparator()])))
+    row_b = next(i for i in range(w.sessions.proxy.rowCount())
+                 if w.sessions.proxy.data(w.sessions.proxy.index(i, 0), Qt.ItemDataRole.UserRole).session_id == B)
+    rect = w.sessions.view.visualRect(w.sessions.proxy.index(row_b, 1))
+    w.sessions.view.customContextMenuRequested.emit(rect.center())
+    assert seen == [[("Rename…", True), ("Manage backups…", True), ("Delete all backups…", False),
+                     ("Delete session…", True)]]
+    assert w.sessions.current_row().session_id == B, "right-click selects the row"
+    acts = menus[0].actions()
+    assert acts[-1].text() == "Delete session…" and acts[-2].isSeparator(), "Delete sits alone at the bottom"
+
+    from ccprune.gui.theme import apply_theme
+    apply_theme(app)
+    menu = menus[0]
+    menu.adjustSize()
+    menu.ensurePolished()
+    image = menu.grab().toImage()
+
+    def red_share(action) -> float:
+        """Of the entry's text pixels, the share that is red."""
+        r = menu.actionGeometry(action)
+        bg = image.pixelColor(r.right() - 2, r.center().y())
+        text = red = 0
+        for x in range(r.left(), r.right()):
+            for y in range(r.top(), r.bottom()):
+                c = image.pixelColor(x, y)
+                if abs(c.red() - bg.red()) + abs(c.green() - bg.green()) + abs(c.blue() - bg.blue()) > 120:
+                    text += 1
+                    red += c.red() > c.green() + 60 and c.red() > c.blue() + 60
+        return red / text if text else 0.0
+    shares = {a.text(): red_share(a) for a in acts if not a.isSeparator() and a.isEnabled()}
+    assert shares["Delete session…"] > 0.6, shares
+    assert all(v < 0.2 for k, v in shares.items() if k != "Delete session…"), shares
+
+
+def test_rename_from_the_menu(world, app, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+    from ccprune.manage import custom_title
+    make, paths = world
+    w = make()
+    row = next(r for r in w.sessions.model.rows if r.session_id == A)
+    monkeypatch.setattr(QInputDialog, "getText", staticmethod(lambda *a, **k: ("Renamed here", True)))
+    w.rename(row)
+    assert custom_title(paths[A]) == "Renamed here"
+    assert '"customTitle":"Renamed here"' in open(paths[A]).read().splitlines()[-1]
+    assert wait(app, lambda: next(r for r in w.sessions.model.rows if r.session_id == A).title == "Renamed here")
+
+
+def test_rename_refuses_a_running_session(world, app, monkeypatch):
+    from ccprune.manage import custom_title
+    make, paths = world
+    w = make()
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a[2])))
+    os.utime(paths[A], None)
+    w.rename(next(r for r in w.sessions.model.rows if r.session_id == A))
+    assert "can't be renamed now" in warned[0] and "/rename" in warned[0]
+    assert custom_title(paths[A]) is None
+
+
+def test_delete_from_the_menu_removes_the_session(world, app, monkeypatch):
+    import ccprune.gui.window as win
+    make, paths = world
+    w = make()
+    select(app, w, A)
+    w.panel.apply.click()
+    assert wait(app, lambda: not w.busy and list_snapshots(paths[A]))
+    os.utime(paths[A], (time.time() - 3600,) * 2)       # past the recent-edit guard
+    asked = []
+    monkeypatch.setattr(win, "confirm_delete", lambda parent, row, files: asked.append(
+        (row.session_id, row.title, [a.kind for a in files.artifacts])) or True)
+    w.delete(next(r for r in w.sessions.model.rows if r.session_id == A))
+    assert wait(app, lambda: not os.path.exists(paths[A]))
+    sid, title, kinds = asked[0]
+    assert sid == A and title and "snapshot" in kinds and kinds[-1] == "transcript"
+    assert not list_snapshots(paths[A])
+    assert wait(app, lambda: [r.session_id for r in w.sessions.model.rows] == [B])
+    assert w.row is None and not w.panel.apply.isEnabled()
+    assert "deleted session" in w.preview.report.toPlainText()
+
+
+def test_delete_cancelled_or_live_keeps_the_session(world, app, monkeypatch, tmp_path):
+    import ccprune.gui.window as win
+    make, paths = world
+    w = make()
+    monkeypatch.setattr(win, "confirm_delete", lambda *a: False)
+    w.delete(next(r for r in w.sessions.model.rows if r.session_id == A))
+    assert os.path.exists(paths[A])
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", staticmethod(lambda *a, **k: warned.append(a[2])))
+    monkeypatch.setattr(win, "confirm_delete", lambda *a: True)
+    os.utime(paths[A], None)
+    w.delete(next(r for r in w.sessions.model.rows if r.session_id == A))
+    assert os.path.exists(paths[A]) and "can't be deleted now" in warned[0]
+
+
+def test_backups_dialog_deletes_several_and_renumbers(world, app, monkeypatch):
+    import ccprune.gui.actions as act
+    from ccprune.snapshots import take_snapshot
+    make, paths = world
+    for k in range(4):
+        take_snapshot(paths[A], f"s{k}")
+    w = make()
+    row = next(r for r in w.sessions.model.rows if r.session_id == A)
+    monkeypatch.setattr(act, "_ask", lambda *a, **k: True)
+    d = act.BackupsDialog(w, row, w.preview.show_report)
+    t = d.tab
+    assert t.table.rowCount() == 4 and t.delete_all.isEnabled()
+    t.table.selectRow(0)
+    t.table.selectionModel().select(t.table.model().index(2, 0),
+                                    t.table.selectionModel().SelectionFlag.Select
+                                    | t.table.selectionModel().SelectionFlag.Rows)
+    assert t.delete.text() == "Delete 2" and not t.restore.isEnabled()
+    t.delete.click()
+    assert [(s.n, s.label) for s in list_snapshots(paths[A])] == [(0, "s1"), (1, "s3")]
+    assert t.table.rowCount() == 2 and d.changed
+    t.delete_all.click()
+    assert list_snapshots(paths[A]) == [] and t.table.rowCount() == 0
+    d.close()
+
+
+def test_delete_all_backups_from_the_menu(world, app, monkeypatch):
+    import ccprune.gui.window as win
+    from ccprune.snapshots import take_snapshot
+    make, paths = world
+    take_snapshot(paths[B], "x")
+    take_snapshot(paths[B], "y")
+    w = make()
+    before = open(paths[B], "rb").read()
+    monkeypatch.setattr(win, "_ask", lambda *a, **k: True)
+    w.delete_backups(next(r for r in w.sessions.model.rows if r.session_id == B))
+    assert list_snapshots(paths[B]) == [] and open(paths[B], "rb").read() == before
+    assert wait(app, lambda: next(r for r in w.sessions.model.rows if r.session_id == B).snaps == 0)
+
+
+def test_apply_says_why_an_edit_cannot_be_made(world, app, monkeypatch):
+    import ccprune.gui.window as win
+    from ccprune.errors import PruneError
+    make, _ = world
+
+    def refuse(*a, **k):
+        raise PruneError("refusing: 40 blocks were reported dropped. Delete all thinking instead, "
+                         "or leave thinking as it is.")
+    monkeypatch.setattr(win, "plan_prune", refuse)
+    w = make()
+    w.sessions.select_path(next(r.path for r in w.sessions.model.rows if r.session_id == A))
+    assert wait(app, lambda: w.plan_error)
+    status = w.panel.status.text()
+    assert status.startswith("Can't apply: refusing: 40 blocks") and "Delete all thinking" in status
+    assert "can't be made" in w.preview.details.toPlainText()

@@ -100,7 +100,8 @@ class TimelineTab(QWidget):
 
 class SnapshotsTab(QWidget):
     restoreRequested = Signal(int)
-    deleteRequested = Signal(int)
+    deleteRequested = Signal(list)      # snapshot numbers
+    deleteAllRequested = Signal()
     pinToggled = Signal(int, bool)
 
     def __init__(self):
@@ -110,7 +111,7 @@ class SnapshotsTab(QWidget):
         self.table.verticalHeader().hide()
         self.table.setShowGrid(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         head = self.table.horizontalHeader()
         head.setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         head.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
@@ -120,11 +121,12 @@ class SnapshotsTab(QWidget):
         self.restore = QPushButton("Restore")
         self.pin = QPushButton("Pin")
         self.delete = QPushButton("Delete")
-        for b in (self.restore, self.pin, self.delete):
+        self.delete_all = QPushButton("Delete all")
+        for b in (self.restore, self.pin, self.delete, self.delete_all):
             b.setEnabled(False)
         bar = QHBoxLayout()
         bar.addWidget(self.total, 1)
-        for b in (self.restore, self.pin, self.delete):
+        for b in (self.restore, self.pin, self.delete, self.delete_all):
             bar.addWidget(b)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(6, 6, 6, 6)
@@ -132,12 +134,17 @@ class SnapshotsTab(QWidget):
         lay.addLayout(bar)
         self.snaps: list[SnapshotInfo] = []
         self.table.itemSelectionChanged.connect(self._selected)
-        self.restore.clicked.connect(lambda: self._emit(self.restoreRequested))
-        self.delete.clicked.connect(lambda: self._emit(self.deleteRequested))
+        self.restore.clicked.connect(self._restore)
+        self.delete.clicked.connect(self._delete)
+        self.delete_all.clicked.connect(self.deleteAllRequested)
         self.pin.clicked.connect(self._toggle_pin)
 
-    def set_snapshots(self, snaps: list[SnapshotInfo], current_size: int = 0) -> None:
+    def set_snapshots(self, snaps: list[SnapshotInfo], keep_selection: bool = False) -> None:
+        """Show these snapshots. With keep_selection, the same numbers stay
+        selected (for changes that do not renumber, such as a pin)."""
+        keep = {s.n for s in self.selected()} if keep_selection else set()
         self.snaps = snaps
+        self.table.clearSelection()
         self.table.setRowCount(len(snaps))
         for i, s in enumerate(snaps):
             taken = datetime.fromtimestamp(s.created).strftime("%Y-%m-%d %H:%M")
@@ -148,25 +155,43 @@ class SnapshotsTab(QWidget):
             self.table.setItem(i, 4, item("pinned" if s.pinned else "", theme.WARN))
         self.total.setText(f"{len(snaps)} snapshot(s), {fmt.size(sum(s.size for s in snaps))}"
                            if snaps else "No snapshots yet.")
+        self.delete_all.setEnabled(bool(snaps))
+        if keep:
+            mode = self.table.selectionMode()
+            self.table.setSelectionMode(QAbstractItemView.SelectionMode.MultiSelection)
+            for i, s in enumerate(snaps):
+                if s.n in keep:
+                    self.table.selectRow(i)
+            self.table.setSelectionMode(mode)
         self._selected()
 
-    def _current(self) -> SnapshotInfo | None:
-        rows = self.table.selectionModel().selectedRows()
-        return self.snaps[rows[0].row()] if rows else None
+    def selected(self) -> list[SnapshotInfo]:
+        rows = sorted(r.row() for r in self.table.selectionModel().selectedRows())
+        return [self.snaps[r] for r in rows if r < len(self.snaps)]
 
     def _selected(self) -> None:
-        s = self._current()
-        for b in (self.restore, self.pin, self.delete):
-            b.setEnabled(s is not None)
-        self.pin.setText("Unpin" if s and s.pinned else "Pin")
+        chosen = self.selected()
+        one = chosen[0] if len(chosen) == 1 else None
+        self.restore.setEnabled(one is not None)
+        self.pin.setEnabled(one is not None)
+        self.delete.setEnabled(bool(chosen))
+        self.delete.setText(f"Delete {len(chosen)}" if len(chosen) > 1 else "Delete")
+        self.pin.setText("Unpin" if one and one.pinned else "Pin")
 
-    def _emit(self, signal) -> None:
-        if s := self._current():
-            signal.emit(s.n)
+    def _restore(self) -> None:
+        chosen = self.selected()
+        if len(chosen) == 1:
+            self.restoreRequested.emit(chosen[0].n)
+
+    def _delete(self) -> None:
+        chosen = self.selected()
+        if chosen:
+            self.deleteRequested.emit([s.n for s in chosen])
 
     def _toggle_pin(self) -> None:
-        if s := self._current():
-            self.pinToggled.emit(s.n, not s.pinned)
+        chosen = self.selected()
+        if len(chosen) == 1:
+            self.pinToggled.emit(chosen[0].n, not chosen[0].pinned)
 
 
 class Drawer(QTabWidget):

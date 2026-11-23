@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen
-from PySide6.QtWidgets import (QAbstractItemView, QDoubleSpinBox, QHBoxLayout, QSizePolicy,
-                               QSlider, QStyle, QStyledItemDelegate, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QDoubleSpinBox, QHBoxLayout, QMenu,
+                               QProxyStyle, QSizePolicy, QSlider, QStyle, QStyledItemDelegate,
+                               QStyleOptionMenuItem, QWidget)
 
 from . import theme
 
@@ -247,3 +248,36 @@ def style_rows(view: QAbstractItemView) -> None:
     view.setMouseTracking(True)
     view.viewport().setAttribute(Qt.WidgetAttribute.WA_Hover, True)
     view.viewport().installEventFilter(_HoverTracker(view, delegate))
+
+
+class DangerMenuStyle(QProxyStyle):
+    """Draws the menu entries named in `danger` in the theme's red, and the
+    separators as a line that shows on the dark theme."""
+
+    def __init__(self, danger: set[str]):
+        super().__init__()
+        self.danger = danger
+
+    def drawControl(self, element, option, painter, widget=None) -> None:
+        if (element == QStyle.ControlElement.CE_MenuItem
+                and option.menuItemType == QStyleOptionMenuItem.MenuItemType.Separator):
+            r = option.rect
+            y = r.center().y()
+            painter.save()
+            painter.setPen(QPen(QColor("#5a606a"), 1))
+            painter.drawLine(r.left() + 8, y, r.right() - 8, y)
+            painter.restore()
+            return
+        if element == QStyle.ControlElement.CE_MenuItem and option.text.split("\t")[0] in self.danger:
+            option = QStyleOptionMenuItem(option)
+            for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.ButtonText,
+                         QPalette.ColorRole.Text, QPalette.ColorRole.HighlightedText):
+                option.palette.setColor(role, QColor(theme.BAD))
+        super().drawControl(element, option, painter, widget)
+
+
+def mark_danger(menu: QMenu, *texts: str) -> None:
+    """Draw these entries of the menu in red."""
+    style = DangerMenuStyle(set(texts))
+    menu.setStyle(style)
+    menu._danger_style = style

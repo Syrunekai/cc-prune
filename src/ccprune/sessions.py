@@ -56,27 +56,28 @@ def user_text(rec: dict) -> str:
     return "" if content.startswith("<local-command-") else content
 
 
-def session_title(path: str, objs: list[dict]) -> str | None:
-    best = None
-    for o in objs:
-        t = o.get("type")
-        if t == "custom-title":
-            cand = (3, (o.get("customTitle") or "").strip())
-        elif t == "ai-title":
-            cand = (2, (o.get("aiTitle") or "").strip())
-        elif t == "summary":
-            cand = (1, (o.get("summary") or "").strip())
-        else:
-            continue
-        if cand[1] and (best is None or cand[0] >= best[0]):
-            best = cand
+def session_title(path: str, objs: list[dict], tail: list[dict] | None = None) -> str | None:
+    """The title claude --resume shows: the newest custom-title record, then
+    the custom-title.json side file, then the newest ai-title, then a summary.
+    `tail` is the end of the file, where Claude Code re-appends the title
+    after every reply; `objs` may be anything else read from it."""
+    def newest(recs: list[dict], kind: str, key: str) -> str:
+        for o in reversed(recs):
+            if o.get("type") == kind and isinstance(o.get(key), str) and o[key].strip():
+                return o[key].strip()
+        return ""
+
+    recs = objs + (tail or [])
     sidecar = os.path.join(os.path.splitext(path)[0], "custom-title.json")
     try:
         with open(sidecar, encoding="utf-8") as fh:
             custom = (json.load(fh).get("customTitle") or "").strip()
     except (OSError, json.JSONDecodeError, AttributeError):
         custom = ""
-    return custom or (best[1] if best else None)
+    renamed = newest(recs if tail is None else tail, "custom-title", "customTitle")
+    return (renamed or custom
+            or newest(recs, "custom-title", "customTitle")
+            or newest(recs, "ai-title", "aiTitle") or newest(recs, "summary", "summary") or None)
 
 
 def scan_session(path: str, want_last: bool, want_count: bool) -> dict | None:
@@ -98,7 +99,7 @@ def scan_session(path: str, want_last: bool, want_count: bool) -> dict | None:
         proj = os.path.basename(os.path.dirname(path))
         cwd = proj.replace("-", "/") if proj.startswith("-") else proj
 
-    title = session_title(path, head + tail)
+    title = session_title(path, head, tail)
     first_user = next((t for t in map(user_text, head) if t), "")
     last_user = next((t for t in map(user_text, reversed(tail)) if t), "")
     about = title or (last_user if want_last else first_user) or first_user

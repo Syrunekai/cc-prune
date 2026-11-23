@@ -228,16 +228,19 @@ Every edit takes one snapshot first and labels it (`cut turns 2-30`, `clear`, ..
 changes nothing, such as a clear that matches nothing, writes nothing and takes no snapshot.
 `restore` saves the current file as a snapshot before it overwrites it.
 
-Snapshot 0, the pristine file, is pinned. Pin any other one to keep it, or delete one:
+Snapshot 0, the pristine file, is pinned. Pin any other one to keep it, or delete some:
 
 ```bash
 ./cc-prune snapshots "$F" --pin 3
 ./cc-prune snapshots "$F" --unpin 3
-./cc-prune snapshots "$F" --delete 3
+./cc-prune snapshots "$F" --delete 1 3     # the rest are renumbered from 0
+./cc-prune snapshots "$F" --delete-all
 ```
 
-Set `MAX_SNAPSHOTS` in `src/ccprune/settings.py` (0 keeps all, the default) to cap them. After an
-edit succeeds, the oldest unpinned snapshots beyond the cap are deleted. Numbers are never reused.
+Snapshots are always numbered 0 to N-1, oldest first: deleting any of them renumbers the rest,
+and their labels, pins and times move with them. Set `MAX_SNAPSHOTS` in
+`src/ccprune/settings.py` (0 keeps all, the default) to cap them. After an edit succeeds, the
+oldest unpinned snapshots beyond the cap are deleted.
 
 ---
 
@@ -341,6 +344,10 @@ may ask "Run" or "Open").
   estimated context. The estimate is labeled **Anchored** (it rests on real request counts) or
   **Chained** (it rests on an earlier estimate and can be well off). Apply is disabled while a
   running session holds the transcript, and waits out the recent-edit check on its own.
+- **Right-click a session** for **Rename…**, **Manage backups…**, **Delete all backups…** and, at
+  the bottom behind its own separator and in red, **Delete session…** (see
+  [Rename and delete](#rename-and-delete)). Manage backups lists the session's
+  snapshots to delete (several at once with Ctrl or Shift), pin or restore.
 - **Drawer** along the bottom, hidden until you open it with the button at the bottom left
   (Ctrl+D). Opening it changes nothing. It has the turn timeline and the snapshots.
   The two-tip range slider there is only used when you choose **By turn range** in the settings
@@ -401,6 +408,28 @@ export BASH_MAX_OUTPUT_LENGTH=4000     # default is 30000
 
 ---
 
+## Rename and delete
+
+```bash
+./cc-prune rename "$F" "A better title"
+./cc-prune delete "$F"                     # lists what would go; add --yes to delete it
+```
+
+`rename` does what Claude Code's `/rename` does: it appends a `custom-title` record to the
+transcript, which is what `claude --resume` shows, and writes the same title to
+`<project>/<session id>/custom-title.json`. The transcript keeps its modification time. It
+refuses a running session, because a running Claude Code writes its own title back after every
+reply; use `/rename` there.
+
+`delete` removes the session and everything kept for it: the transcript, its snapshots, its
+folder (subagent transcripts, tool results, the title), its `file-history` and `session-env`
+folders, its `teams`, `tasks` and `jobs` folders (named by the first 8 characters of the id, and
+kept when they record another session's id or another transcript shares those characters), and
+cc-prune's favorite and estimate-log entries. It refuses a running session. `history.jsonl`,
+the prompt history every Claude Code process appends to, is not rewritten.
+
+---
+
 ## Export
 
 `export` writes a session as a readable markdown transcript, the conversation text only by
@@ -452,7 +481,9 @@ usage FILE                     real API token counts
 inspect FILE                   byte accounting by bucket
 clear FILE --results N ...     clear buckets (snapshots first, resets usage)
 reset-usage FILE --tokens N    rewrite stale recorded usage so a pruned session resumes
-snapshots FILE [--pin N ...]   list snapshots, pin, unpin or delete one
+snapshots FILE [--pin N ...]   list snapshots; pin, unpin, delete some or all
+rename FILE TITLE              set a session's title, as /rename does
+delete FILE [--yes]            delete a session and everything kept for it
 restore FILE N                 restore snapshot N
 audit FILE LINE...             is this specific result safe to clear?
 strip-commands FILE --orphans  clear /context, /cost output

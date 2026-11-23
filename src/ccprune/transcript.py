@@ -94,7 +94,8 @@ def failing_thinking(recs: list[dict]) -> list[tuple[int, int]]:
     before = [p for p in pos if p[0] < start]
     if k > len(before):
         raise PruneError(f"refusing: the report at record {start} lists {k} dropped "
-                         f"thinking blocks but only {len(before)} precede it")
+                         f"thinking blocks but only {len(before)} precede it, so the failing "
+                         f"blocks can't be told apart. Delete all thinking instead, or leave thinking as it is.")
     if len(before) - k <= 1:
         return before
     if before[-1] == pos[-1]:
@@ -102,7 +103,7 @@ def failing_thinking(recs: list[dict]) -> list[tuple[int, int]]:
     raise PruneError(f"refusing: {k} blocks were reported dropped, but {len(before) - k} "
                      f"older and {len(pos) - len(before)} newer thinking blocks surround "
                      f"them. Only two layouts are supported (all earlier blocks dropped, "
-                     f"or the dropped blocks are the newest) and this is neither")
+                     f"or the dropped blocks are the newest) and this is neither. Delete all thinking instead, or leave thinking as it is.")
 
 
 def thinking_fingerprint(recs: list[dict]) -> list[str]:

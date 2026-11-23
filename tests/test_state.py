@@ -52,19 +52,22 @@ def test_snapshot_labels_and_pins(transcript):
     set_pinned(transcript, 0, False)
     assert [(s.n, s.pinned) for s in list_snapshots(transcript)] == [(0, False), (1, True)]
     delete_snapshot(transcript, 0)
-    assert [s.n for s in list_snapshots(transcript)] == [1]
-    assert not os.path.exists(f"{transcript}.snap0")
+    after = list_snapshots(transcript)
+    assert [(s.n, s.label, s.pinned) for s in after] == [(0, "second", True)]
+    assert not os.path.exists(f"{transcript}.snap1")
 
 
 def test_limit_deletes_the_oldest_unpinned_and_never_the_pristine(transcript):
-    for _ in range(5):
-        take_snapshot(transcript)
+    for k in range(5):
+        take_snapshot(transcript, f"s{k}")
     assert [s.n for s in snapshots_over_limit(transcript, 3, adding=1)] == [1, 2]
     assert [s.n for s in enforce_limit(transcript, 3)] == [1]
-    assert [s.n for s in list_snapshots(transcript)] == [0, 2, 3, 4]
-    take_snapshot(transcript)
-    assert [s.n for s in enforce_limit(transcript, 3)] == [2]
-    assert [s.n for s in list_snapshots(transcript)] == [0, 3, 4, 5]
+    assert [(s.n, s.label) for s in list_snapshots(transcript)] == \
+        [(0, "s0"), (1, "s2"), (2, "s3"), (3, "s4")]
+    take_snapshot(transcript, "s5")
+    assert [s.label for s in enforce_limit(transcript, 3)] == ["s2"]
+    assert [(s.n, s.label) for s in list_snapshots(transcript)] == \
+        [(0, "s0"), (1, "s3"), (2, "s4"), (3, "s5")]
     assert snapshots_over_limit(transcript, 0, adding=1) == []
 
 
@@ -76,7 +79,7 @@ def test_apply_enforces_the_limit_after_the_edit(transcript, monkeypatch):
     assert [s.n for s in plan.will_drop] == [1, 2]
     applied = apply_plan(plan)
     assert [s.n for s in applied.dropped] == [1, 2]
-    assert [s.n for s in list_snapshots(transcript)] == [0, 3, 4]
+    assert [s.n for s in list_snapshots(transcript)] == [0, 1, 2]
     assert list_snapshots(transcript)[-1].label == plan.label
 
 
@@ -161,3 +164,59 @@ def test_an_older_estimate_is_not_matched_with_a_request_after_a_later_edit(tran
 
     done = calibration.reconcile(transcript)
     assert [(o.label, o.real) for o in done] == [("later edit", 5_001)]
+
+
+def test_deleting_renumbers_and_moves_labels_pins_and_times(transcript):
+    from ccprune.snapshots import delete_snapshots, read_meta, snapshot_time
+    for k in range(5):
+        take_snapshot(transcript, f"s{k}")
+    set_pinned(transcript, 3, True)
+    times = {s.label: s.created for s in list_snapshots(transcript)}
+    contents = {s.label: open(s.path, "rb").read() for s in list_snapshots(transcript)}
+    freed = delete_snapshots(transcript, [0, 2])
+    assert freed > 0
+    after = list_snapshots(transcript)
+    assert [(s.n, s.label, s.pinned) for s in after] == [(0, "s1", False), (1, "s3", True), (2, "s4", False)]
+    assert all(s.created == times[s.label] for s in after)
+    assert all(open(s.path, "rb").read() == contents[s.label] for s in after)
+    assert not os.path.exists(f"{transcript}.snap3") and not os.path.exists(f"{transcript}.snap4")
+    assert sorted(read_meta(transcript)) == ["0", "1", "2"]
+    assert snapshot_time(transcript, 1) == times["s3"]
+
+
+def test_the_estimator_reads_snapshot_times_from_the_metadata(transcript):
+    from ccprune.estimate import last_edit_time
+    from ccprune.snapshots import delete_snapshots
+    for k in range(3):
+        take_snapshot(transcript, f"s{k}")
+    newest = list_snapshots(transcript)[-1].created
+    time.sleep(0.05)
+    delete_snapshots(transcript, [0])            # renames the others: their change times move
+    assert last_edit_time(transcript) == newest
+    assert os.stat(f"{transcript}.snap1").st_ctime > newest
+
+
+def test_a_gapped_set_from_an_older_version_is_closed_before_a_new_snapshot(transcript):
+    import shutil
+    for k in range(3):
+        take_snapshot(transcript, f"s{k}")
+    os.remove(f"{transcript}.snap1")            # as an older version deleting one would leave it
+    shutil.move(f"{transcript}.snap2", f"{transcript}.snap5")
+    from ccprune.snapshots import read_meta, write_meta
+    meta = read_meta(transcript)
+    meta.pop("1")
+    meta["5"] = meta.pop("2")
+    write_meta(transcript, meta)
+    n, _ = take_snapshot(transcript, "new")
+    assert n == 2
+    assert [(s.n, s.label) for s in list_snapshots(transcript)] == [(0, "s0"), (1, "s2"), (2, "new")]
+
+
+def test_delete_all_snapshots(transcript):
+    from ccprune.snapshots import delete_all_snapshots, meta_path
+    for k in range(3):
+        take_snapshot(transcript, f"s{k}")
+    before = open(transcript, "rb").read()
+    assert delete_all_snapshots(transcript) > 0
+    assert list_snapshots(transcript) == [] and not os.path.exists(meta_path(transcript))
+    assert open(transcript, "rb").read() == before

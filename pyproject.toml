@@ -1,6 +1,6 @@
 [project]
 name = "cc-prune"
-version = "0.5.2"
+version = "0.6.0"
 description = "Surgical context recovery for Claude Code sessions."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -30,3 +30,5 @@ module-name = "ccprune"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# a test that blocks longer than this prints where it is stuck
+faulthandler_timeout = 60

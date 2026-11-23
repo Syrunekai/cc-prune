@@ -112,7 +112,7 @@ def plan_prune(path: str, cut: CutOptions | None = None, clear: ClearOptions | N
     since = last_edit_time(path)
     cut_plan = plan_cut(work, cut) if cut else None
     new = cut_plan.new if cut_plan else work
-    outcome = clear_records(new, clear) if clear else None
+    outcome = clear_records(new, clear, before=orig if cut_plan else None) if clear else None
 
     last_ctx = last_context(orig)
     estimate, anchored = None, False

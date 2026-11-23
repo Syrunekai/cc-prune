@@ -82,10 +82,23 @@ def shrink_long_strings(obj, limit: int, stats: list) -> None:
             shrink_long_strings(v, limit, stats)
 
 
-def thinking_plan(recs: list[dict], opts: ClearOptions) -> list[tuple[int, int]]:
+def thinking_plan(recs: list[dict], opts: ClearOptions,
+                  before: list[dict] | None = None) -> list[tuple[int, int]]:
+    """The thinking blocks to delete. With `before`, the records as they were
+    before a cut in the same edit, the failing blocks are found there, where
+    the API's reports still line up with the blocks, and kept where they
+    survived the cut."""
     if opts.drop_all_thinking:
         return thinking_positions(recs)
-    return failing_thinking(recs)
+    if before is None:
+        return failing_thinking(recs)
+    failing = {_block_key(before[i], j) for i, j in failing_thinking(before)}
+    return [(i, j) for i, j in thinking_positions(recs) if _block_key(recs[i], j) in failing]
+
+
+def _block_key(rec: dict, j: int) -> tuple[str, str]:
+    block = rec["message"]["content"][j]
+    return rec.get("uuid") or "", json.dumps(block, ensure_ascii=False, sort_keys=True)
 
 
 def describe_drop(recs: list[dict], pos: list[tuple[int, int]],
@@ -107,9 +120,11 @@ def preview_thinking(path: str, opts: ClearOptions) -> ThinkingDrop | None:
     return describe_drop(recs, thinking_positions(recs), thinking_plan(recs, opts))
 
 
-def clear_records(recs: list[dict], opts: ClearOptions) -> ClearOutcome:
+def clear_records(recs: list[dict], opts: ClearOptions,
+                  before: list[dict] | None = None) -> ClearOutcome:
     """Clear the buckets `opts` asks for in `recs`, in place, leaving the last
-    `opts.keep_tail` of the records alone."""
+    `opts.keep_tail` of the records alone. `before` is the transcript as it
+    was before a cut made in the same edit (see thinking_plan)."""
     thinking = thinking_fingerprint(recs)
     cutoff = int(len(recs) * (1 - opts.keep_tail))
     freed, hits = Counter(), Counter()
@@ -117,7 +132,7 @@ def clear_records(recs: list[dict], opts: ClearOptions) -> ClearOutcome:
 
     if opts.drops_thinking:
         pos = thinking_positions(recs)
-        plan = thinking_plan(recs, opts)
+        plan = thinking_plan(recs, opts, before)
         targets = set(plan)
         drop = describe_drop(recs, pos, plan)
         for i, j in pos:

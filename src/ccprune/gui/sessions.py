@@ -138,6 +138,7 @@ def _neg(iso: str) -> tuple:
 
 class SessionsPanel(QWidget):
     selected = Signal(object)           # a SessionRow, or None
+    menuRequested = Signal(object, object)  # a SessionRow, and the global position
     favoriteToggled = Signal(str, bool)
     refreshRequested = Signal()
 
@@ -173,6 +174,8 @@ class SessionsPanel(QWidget):
         self.view.setColumnWidth(0, 30)
         self.view.setColumnHidden(3, True)
         style_rows(self.view)
+        self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._menu)
 
         top = QHBoxLayout()
         top.addWidget(self.search, 1)
@@ -200,6 +203,15 @@ class SessionsPanel(QWidget):
         if index.column() == 0 and (r := self._row_at(index)):
             self.favoriteToggled.emit(r.session_id, not r.favorite)
 
+    def _menu(self, pos) -> None:
+        index = self.view.indexAt(pos)
+        row = self._row_at(index)
+        if row is None:
+            return
+        if self._path != row.path:
+            self.view.setCurrentIndex(self.proxy.index(index.row(), 1))
+        self.menuRequested.emit(row, self.view.viewport().mapToGlobal(pos))
+
     def _current(self, current, _previous) -> None:
         r = self._row_at(current)
         self._path = r.path if r else None
@@ -223,6 +235,15 @@ class SessionsPanel(QWidget):
                     self.view.setCurrentIndex(idx)
                     sm.blockSignals(False)
                 return
+
+    def remove_path(self, path: str) -> None:
+        rows = [r for r in self.model.rows if r.path != path]
+        if len(rows) != len(self.model.rows):
+            if self._path == path:
+                self._path = None
+            self.view.selectionModel().blockSignals(True)
+            self.model.set_rows(rows)
+            self.view.selectionModel().blockSignals(False)
 
     def current_row(self) -> SessionRow | None:
         for r in self.model.rows:

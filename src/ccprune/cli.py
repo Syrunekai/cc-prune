@@ -21,7 +21,9 @@ from .guard import check_live
 from .maintenance import apply_strip, plan_strip, reset_usage_file
 from .prune import Applied, Plan, apply_plan, plan_prune
 from .sessions import find_sessions, to_local
-from .snapshots import delete_snapshot, list_snapshots, restore_snapshot, set_pinned
+from .manage import delete_session, rename_session, session_files
+from .snapshots import (delete_all_snapshots, delete_snapshots, list_snapshots, restore_snapshot,
+                        set_pinned)
 from .transcript import first_text, load
 from .turns import Turns
 from .usage import usage_rows
@@ -47,9 +49,12 @@ def cmd_snapshots(args) -> None:
         set_pinned(args.path, args.pin, True)
     if args.unpin is not None:
         set_pinned(args.path, args.unpin, False)
-    if args.delete is not None:
-        freed = delete_snapshot(args.path, args.delete)
-        print(f"deleted snap{args.delete} ({mb(freed)})")
+    if args.delete:
+        freed = delete_snapshots(args.path, args.delete)
+        names = ", ".join(f"snap{n}" for n in sorted(set(args.delete)))
+        print(f"deleted {names} ({mb(freed)}); the rest are renumbered from 0")
+    if args.delete_all:
+        print(f"deleted every snapshot ({mb(delete_all_snapshots(args.path))})")
     snaps = list_snapshots(args.path)
     if not snaps:
         print("no snapshots yet -- the first edit creates snap0 "
@@ -59,6 +64,27 @@ def cmd_snapshots(args) -> None:
         pin = "pinned" if s.pinned else ""
         print(f"  {os.path.basename(s.path):<52} {mb(s.size):>10}  {pin:<7} {s.label}")
     print(f"\n  current  {os.path.basename(args.path):<52} {mb(os.path.getsize(args.path))}")
+
+
+def cmd_rename(args) -> None:
+    path = resolve_session(args.file)
+    print(f"renamed to {rename_session(path, args.title, force=args.force)!r}")
+
+
+def cmd_delete(args) -> None:
+    path = resolve_session(args.file)
+    files = session_files(path)
+    print(f"session {files.session_id}")
+    for a in files.artifacts:
+        print(f"  {a.kind:<15} {mb(a.size):>10}  {a.path}{os.sep if a.is_dir else ''}")
+    for k in files.kept:
+        print(f"  {'kept':<15} {'':>10}  {k}{os.sep} (records another session)")
+    print(f"  {'total':<15} {mb(files.size):>10}")
+    if not args.yes:
+        print("\nPREVIEW, nothing deleted. Add --yes to delete all of the above; it cannot be undone.")
+        return
+    done = delete_session(path, force=args.force)
+    print(f"\ndeleted {len(done.removed)} item(s), {mb(done.size)}")
 
 
 def cmd_restore(args) -> None:
@@ -683,12 +709,25 @@ def build_parser() -> argparse.ArgumentParser:
     ru.add_argument("--force", action="store_true",
                     help="edit a transcript even if a running session has it open")
 
-    s = sub.add_parser("snapshots", help="list snapshots; pin, unpin or delete one")
+    s = sub.add_parser("snapshots", help="list snapshots; pin, unpin or delete them")
     s.add_argument("path")
     s.add_argument("--pin", type=int, metavar="N",
                    help="keep snapshot N even when the snapshot limit is reached")
     s.add_argument("--unpin", type=int, metavar="N")
-    s.add_argument("--delete", type=int, metavar="N")
+    s.add_argument("--delete", type=int, nargs="+", metavar="N",
+                   help="delete these snapshots; the rest are renumbered from 0")
+    s.add_argument("--delete-all", action="store_true", help="delete every snapshot")
+
+    rn = sub.add_parser("rename", help="set a session's title, as /rename does")
+    rn.add_argument("file", metavar="FILE", help="transcript path or session id (prefix)")
+    rn.add_argument("title", help="the new title")
+    rn.add_argument("--force", action="store_true", help="skip the live-session check")
+
+    de = sub.add_parser("delete", help="delete a session and everything kept for it "
+                                       "(previews unless --yes)")
+    de.add_argument("file", metavar="FILE", help="transcript path or session id (prefix)")
+    de.add_argument("--yes", action="store_true")
+    de.add_argument("--force", action="store_true", help="skip the live-session check")
 
     r = sub.add_parser("restore", help="restore a snapshot")
     r.add_argument("path")
@@ -788,6 +827,7 @@ COMMANDS = {
     "clear": cmd_clear, "reset-usage": cmd_reset_usage, "snapshots": cmd_snapshots,
     "restore": cmd_restore, "audit": cmd_audit, "strip-commands": cmd_strip_commands,
     "cut": cmd_cut, "clearcut": cmd_clearcut, "density": cmd_density, "export": cmd_export,
+    "rename": cmd_rename, "delete": cmd_delete,
 }
 
 

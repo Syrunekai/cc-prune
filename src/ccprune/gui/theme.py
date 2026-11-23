@@ -73,4 +73,5 @@ def apply_theme(app: QApplication) -> None:
         QRadioButton::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}
         QRadioButton::indicator:disabled {{ border-color: #3a3f47; }}
         QHeaderView::section {{ text-align: left; }}
+
     """)

@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.6.0 (2026-11-21)
+
+### Added
+
+- **Right-click a session** in the window for Rename…, Manage backups…, Delete all backups… and,
+  last, behind its own separator and in red, Delete session….
+- **`rename`** (and Rename… in the window) sets a session's title as `/rename` does: it appends
+  a `custom-title` record to the transcript, which `claude --resume` reads, and writes
+  `<project>/<id>/custom-title.json`. It refuses a running session, which writes its own title
+  back after every reply.
+- The session list shows the newest `custom-title` record, as `claude --resume` does, before the
+  side file.
+- **`delete`** (and Delete session… in the window, which shows the session's title and id before
+  anything goes) removes the session and everything kept for it: transcript, snapshots, its
+  folder with subagent transcripts and tool results, `file-history`, `session-env`, and the
+  `teams` / `tasks` / `jobs` folders named by the id's first 8 characters when they are this
+  session's, plus cc-prune's favorite and estimate-log entries. It refuses a running session and
+  previews unless `--yes`. `history.jsonl` is not rewritten.
+- **Manage backups…**: a window listing a session's snapshots, to delete several at once, pin or
+  restore. `snapshots --delete` takes several numbers, and `--delete-all` removes them all.
+
+### Changed
+
+- **Snapshots are always numbered 0 to N-1**: deleting any renumbers the rest, oldest first,
+  moving labels, pins and times with them. Each snapshot's time is recorded in `.snapmeta.json`,
+  since renaming a file changes its change time, which the estimator used.
+- Next to Apply, the window says why an edit can't be made, where it said only "Fix the
+  settings above".
+
+### Fixed
+
+- A cut combined with "Delete failing thinking" found the failing blocks after the cut, where
+  Claude Code's reports no longer line up with the blocks: it could refuse with a misleading
+  count, or pick the wrong blocks. They are now found before the cut, and the ones the cut keeps
+  are dropped. When the report's layout can't be matched at all, the message now says to delete
+  all thinking or leave it.
+
 ## 0.5.2 (2026-11-20)
 
 ### Changed

@@ -5,7 +5,7 @@ import json
 import os
 from datetime import datetime
 
-from .snapshots import snapshot_paths
+from .snapshots import read_meta, snapshot_number, snapshot_paths, snapshot_time
 from .transcript import THINKING, blocks, load, rendered_chars
 from .turns import Turns
 from .usage import ESTIMATE_MARK, context_tokens
@@ -33,7 +33,9 @@ def iso_time(stamp) -> float:
 
 def last_edit_time(path: str) -> float:
     """When this transcript was last rewritten by cc-prune: the newest snapshot."""
-    return max((os.stat(s).st_ctime for s in snapshot_paths(path)), default=0.0)
+    meta = read_meta(path)
+    return max((snapshot_time(path, snapshot_number(s), meta) for s in snapshot_paths(path)),
+               default=0.0)
 
 
 def content_key(rec: dict) -> str:
@@ -163,7 +165,8 @@ def estimate_after(path: str, before: list[dict], new: list[dict],
     if fresh or est is None:
         return est, fresh
     snaps = snapshot_paths(path)
-    times = [os.stat(s).st_ctime for s in snaps]
+    meta = read_meta(path)
+    times = [snapshot_time(path, snapshot_number(s), meta) for s in snaps]
     tried = 0
     for k in range(len(snaps) - 1, -1, -1):
         if times[k] > since:
